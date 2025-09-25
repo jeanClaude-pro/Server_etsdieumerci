@@ -4,7 +4,7 @@ const router = express.Router();
 const mongoose = require("mongoose");
 const Sale = require("../models/Sale");
 const Customer = require("../models/Customer");
-const Product = require("../models/product");
+const Product = require("../models/Product");
 const authMiddleware = require("../middleware/auth");
 
 // normalize to the Sale model enum
