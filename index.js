@@ -9,13 +9,10 @@ const app = express();
 // Middleware
 app.use(express.json());
 app.use(morgan("combined"));
-app.use(
-  cors({
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], // ← ADD PATCH HERE
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+
+// ✅ Allow both local dev + Netlify frontend
+app.use(cors());
+
 
 // Env variables
 const PORT = process.env.PORT || 5000;
