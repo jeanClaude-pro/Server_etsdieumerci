@@ -5,7 +5,7 @@ const cors = require("cors");
 const morgan = require("morgan");
 
 const app = express();
-
+const printRoutes = require('./routes/print');
 // Middleware
 app.use(express.json());
 app.use(morgan("combined"));
@@ -26,6 +26,7 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/users", require("./routes/users"));
 app.use("/api/test", require("./routes/test"));
 app.use("/api/categories", require("./routes/categories"));
+app.use('/api/print', printRoutes);
 
 // Default route
 app.get("/", (req, res) => {
