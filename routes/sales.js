@@ -142,7 +142,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
 /** ---------- CREATE SALE ---------- **/
 router.post("/", authMiddleware, async (req, res) => {
   try {
-    const { customer, items, paymentMethod, salesPerson } = req.body;
+    const { customer, items, paymentMethod, salesPerson, type, reservationDate, reservationTime, notes } = req.body;
 
     if (!customer || !customer.name || !customer.phone) {
       return res
@@ -204,6 +204,7 @@ router.post("/", authMiddleware, async (req, res) => {
     // FIX: Get customer ID from updateCustomerData and set customerId
     const customerId = await updateCustomerData(customer, total);
 
+    // UPDATED: Include type and reservation fields
     const saleData = {
       saleId,
       saleNumber,
@@ -212,13 +213,17 @@ router.post("/", authMiddleware, async (req, res) => {
         phone: customer.phone,
         email: customer.email || "",
       },
-      customerId: customerId, // ← ADDED customerId
+      customerId: customerId,
       items: enrichedItems,
       subtotal,
       total,
       paymentMethod: normalizedPM,
       status: "completed",
-      salesPerson: salesPerson || "Admin"
+      salesPerson: salesPerson || "Admin",
+      type: type || "sale", // Add type field (default to "sale")
+      reservationDate: reservationDate || null, // Add reservation date
+      reservationTime: reservationTime || null, // Add reservation time
+      notes: notes || "" // Add notes field
     };
 
     for (const it of enrichedItems) {
@@ -257,7 +262,8 @@ router.get("/", authMiddleware, async (req, res) => {
       customerPhone, 
       dateFrom, 
       dateTo,
-      status
+      status,
+      type // ADD TYPE FILTER
     } = req.query;
     
     const p = parseInt(page, 10);
@@ -270,6 +276,11 @@ router.get("/", authMiddleware, async (req, res) => {
       filter.status = status;
     } else {
       filter.status = "completed";
+    }
+
+    // ADD TYPE FILTERING
+    if (type) {
+      filter.type = type;
     }
 
     if (dateFrom || dateTo) {
@@ -292,6 +303,27 @@ router.get("/", authMiddleware, async (req, res) => {
   } catch (error) {
     console.error("Error fetching sales:", error);
     res.status(500).json({ error: "Failed to fetch sales" });
+  }
+});
+
+/** ---------- GET RESERVATIONS ---------- **/
+router.get("/reservations/all", authMiddleware, async (req, res) => {
+  try {
+    const { status } = req.query;
+    
+    const filter = { type: "reservation" };
+    
+    if (status) {
+      filter.status = status;
+    }
+
+    const reservations = await Sale.find(filter)
+      .sort({ createdAt: -1 });
+
+    res.json(reservations);
+  } catch (error) {
+    console.error("Error fetching reservations:", error);
+    res.status(500).json({ error: "Failed to fetch reservations" });
   }
 });
 
@@ -335,7 +367,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     const { id } = req.params;
-    const { customer, items, paymentMethod, reason } = req.body;
+    const { customer, items, paymentMethod, reason, type, reservationDate, reservationTime, notes } = req.body;
 
     // Find the original sale
     const originalSale = await Sale.findById(id);
@@ -461,6 +493,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
       changes.set('paymentMethod', { from: originalSale.paymentMethod, to: normalizedPM });
     }
 
+    // Track type changes
+    if (originalSale.type !== type) {
+      changes.set('type', { from: originalSale.type, to: type });
+    }
+
     // Update the sale
     const updatedSale = await Sale.findByIdAndUpdate(
       id,
@@ -470,6 +507,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
         subtotal,
         total,
         paymentMethod: normalizedPM,
+        type: type || originalSale.type,
+        reservationDate: reservationDate || originalSale.reservationDate,
+        reservationTime: reservationTime || originalSale.reservationTime,
+        notes: notes || originalSale.notes,
         editedBy: req.user.userId,
         editedAt: new Date(),
         $push: {
@@ -496,6 +537,61 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Invalid sale ID" });
     }
     res.status(500).json({ error: "Failed to edit sale" });
+  }
+});
+
+/** ---------- MARK RESERVATION AS COMPLETED ---------- **/
+router.patch("/:id/complete", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { completedBy } = req.body;
+
+    const sale = await Sale.findById(id);
+    if (!sale) {
+      return res.status(404).json({ error: "Réservation non trouvée" });
+    }
+
+    const updatedSale = await Sale.findByIdAndUpdate(
+      id,
+      {
+        status: "completed",
+        completedAt: new Date(),
+        completedBy: completedBy || req.user.userId,
+      },
+      { new: true }
+    );
+
+    res.json(updatedSale);
+  } catch (error) {
+    console.error("Error completing reservation:", error);
+    res.status(500).json({ error: "Échec de la mise à jour de la réservation" });
+  }
+});
+
+/** ---------- MARK RESERVATION AS PENDING ---------- **/
+router.patch("/:id/pending", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const sale = await Sale.findById(id);
+    if (!sale) {
+      return res.status(404).json({ error: "Réservation non trouvée" });
+    }
+
+    const updatedSale = await Sale.findByIdAndUpdate(
+      id,
+      {
+        status: "pending",
+        completedAt: null,
+        completedBy: null,
+      },
+      { new: true }
+    );
+
+    res.json(updatedSale);
+  } catch (error) {
+    console.error("Error setting reservation to pending:", error);
+    res.status(500).json({ error: "Échec de la mise à jour de la réservation" });
   }
 });
 

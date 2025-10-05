@@ -25,7 +25,6 @@ const saleItemSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
-
 });
 
 const saleSchema = new mongoose.Schema({
@@ -89,6 +88,33 @@ const saleSchema = new mongoose.Schema({
     enum: ["completed", "refunded", "pending", "voided", "corrected"], // 🔹 Added "corrected"
     default: "completed"
   },
+  // --- NEW RESERVATION FIELDS ---
+  type: {
+    type: String,
+    enum: ["sale", "reservation"],
+    default: "sale"
+  },
+  reservationDate: {
+    type: String,
+    default: null
+  },
+  reservationTime: {
+    type: String,
+    default: null
+  },
+  notes: {
+    type: String,
+    default: ""
+  },
+  completedAt: {
+    type: Date,
+    default: null
+  },
+  completedBy: {
+    type: String,
+    default: null
+  },
+  // --- EXISTING FIELDS ---
   voidedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
@@ -142,6 +168,8 @@ saleSchema.index({ createdAt: -1 });
 saleSchema.index({ "customer.phone": 1 });
 saleSchema.index({ saleId: 1 });
 saleSchema.index({ salesPerson: 1 }); // Add index for sales person
+saleSchema.index({ type: 1 }); // Add index for type (sale/reservation)
+saleSchema.index({ status: 1 }); // Add index for status
 
 // Pre-save middleware to calculate item totals
 saleSchema.pre("save", function(next) {
