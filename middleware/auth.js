@@ -16,7 +16,19 @@ async function authMiddleware(req, res, next) {
 
     const user = await User.findById(decoded.id).select("-password");
 
+    if (!user) {
+      return res.status(401).json({ message: "User not found" });
+    }
+
     req.user = user;
+    
+    // ✅ ADD THESE PERMISSION FLAGS
+    req.user.canValidate = user.role === 'admin' || user.role === 'manager';
+    req.user.isAdmin = user.role === 'admin';
+    
+    // ✅ Also add these for compatibility
+    req.user.id = user._id.toString();
+    req.user.userId = user._id.toString();
 
     next(); // continue to next middleware/route
   } catch (err) {

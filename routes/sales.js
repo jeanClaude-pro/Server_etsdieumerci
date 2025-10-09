@@ -64,7 +64,7 @@ async function recalculateCustomerStats(customerId) {
     
     // Additional safety filter
     const validSales = sales.filter(sale => 
-      sale.status !== "voided" && sale.status !== "corrected"
+      sale.status !== "voided" && sale.status !== "corrected" && sale.type !== "expense"
     );
     
     if (validSales.length === 0) {
@@ -109,6 +109,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
         $match: {
           createdAt: { $gte: startOfDay, $lte: endOfDay },
           status: "completed",
+          type: "sale" // 🔹 Only include sales, not expenses
         },
       },
       {
@@ -124,6 +125,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
     const sales = await Sale.find({
       createdAt: { $gte: startOfDay, $lte: endOfDay },
       status: "completed",
+      type: "sale" // 🔹 Only include sales, not expenses
     }).sort({ createdAt: -1 });
 
     res.json({
@@ -139,11 +141,78 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- CREATE SALE ---------- **/
+/** ---------- CREATE SALE OR EXPENSE ---------- **/
 router.post("/", authMiddleware, async (req, res) => {
   try {
-    const { customer, items, paymentMethod, salesPerson, type, reservationDate, reservationTime, notes } = req.body;
+    const { 
+      customer, 
+      items, 
+      paymentMethod, 
+      salesPerson, 
+      type, 
+      reservationDate, 
+      reservationTime, 
+      notes,
+      // 🔹 NEW EXPENSE FIELDS
+      reason,
+      recipientName,
+      recipientPhone,
+      amount,
+      recordedBy
+    } = req.body;
 
+    const normalizedPM = normalizePaymentMethod(paymentMethod);
+
+    // 🔹 HANDLE EXPENSE TYPE
+    if (type === "expense") {
+      if (!reason || !recipientName || !recipientPhone || !amount) {
+        return res.status(400).json({ 
+          error: "Expense requires reason, recipientName, recipientPhone, and amount" 
+        });
+      }
+
+      const expenseAmount = parseFloat(amount);
+      if (isNaN(expenseAmount) || expenseAmount <= 0) {
+        return res.status(400).json({ 
+          error: "Amount must be a positive number" 
+        });
+      }
+
+      const saleId = `EXP-${Date.now()}-${Math.random()
+        .toString(36)
+        .substr(2, 5)
+        .toUpperCase()}`;
+
+      const saleNumber = `EXP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+      const expenseData = {
+        saleId,
+        saleNumber,
+        customer: {
+          name: recipientName,
+          phone: recipientPhone,
+          email: "",
+        },
+        items: [], // No items for expenses
+        subtotal: expenseAmount,
+        total: expenseAmount,
+        paymentMethod: normalizedPM,
+        status: "expense", // 🔹 Special status for expenses
+        salesPerson: recordedBy || salesPerson || "Admin",
+        type: "expense",
+        reason: reason,
+        recipientName: recipientName,
+        recipientPhone: recipientPhone,
+        notes: notes || ""
+      };
+
+      const expense = new Sale(expenseData);
+      const savedExpense = await expense.save();
+
+      return res.status(201).json(savedExpense);
+    }
+
+    // 🔹 HANDLE REGULAR SALE (existing logic)
     if (!customer || !customer.name || !customer.phone) {
       return res
         .status(400)
@@ -154,8 +223,6 @@ router.post("/", authMiddleware, async (req, res) => {
         .status(400)
         .json({ error: "Sale must contain at least one item" });
     }
-
-    const normalizedPM = normalizePaymentMethod(paymentMethod);
 
     let subtotal = 0;
     const enrichedItems = [];
@@ -220,10 +287,10 @@ router.post("/", authMiddleware, async (req, res) => {
       paymentMethod: normalizedPM,
       status: "completed",
       salesPerson: salesPerson || "Admin",
-      type: type || "sale", // Add type field (default to "sale")
-      reservationDate: reservationDate || null, // Add reservation date
-      reservationTime: reservationTime || null, // Add reservation time
-      notes: notes || "" // Add notes field
+      type: type || "sale",
+      reservationDate: reservationDate || null,
+      reservationTime: reservationTime || null,
+      notes: notes || ""
     };
 
     for (const it of enrichedItems) {
@@ -244,12 +311,12 @@ router.post("/", authMiddleware, async (req, res) => {
 
     return res.status(201).json(savedSale);
   } catch (error) {
-    console.error("Error creating sale:", error);
+    console.error("Error creating sale/expense:", error);
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((e) => e.message);
       return res.status(400).json({ error: errors.join(", ") });
     }
-    return res.status(500).json({ error: "Failed to create sale" });
+    return res.status(500).json({ error: "Failed to create sale/expense" });
   }
 });
 
@@ -275,7 +342,8 @@ router.get("/", authMiddleware, async (req, res) => {
     if (status) {
       filter.status = status;
     } else {
-      filter.status = "completed";
+      // 🔹 Default filter: show completed sales AND expenses
+      filter.status = { $in: ["completed", "expense"] };
     }
 
     // ADD TYPE FILTERING
@@ -303,6 +371,27 @@ router.get("/", authMiddleware, async (req, res) => {
   } catch (error) {
     console.error("Error fetching sales:", error);
     res.status(500).json({ error: "Failed to fetch sales" });
+  }
+});
+
+/** ---------- GET EXPENSES ---------- **/
+router.get("/expenses/all", authMiddleware, async (req, res) => {
+  try {
+    const { status } = req.query;
+    
+    const filter = { type: "expense" };
+    
+    if (status) {
+      filter.status = status;
+    }
+
+    const expenses = await Sale.find(filter)
+      .sort({ createdAt: -1 });
+
+    res.json(expenses);
+  } catch (error) {
+    console.error("Error fetching expenses:", error);
+    res.status(500).json({ error: "Failed to fetch expenses" });
   }
 });
 
@@ -367,7 +456,20 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     const { id } = req.params;
-    const { customer, items, paymentMethod, reason, type, reservationDate, reservationTime, notes } = req.body;
+    const { 
+      customer, 
+      items, 
+      paymentMethod, 
+      reason, 
+      type, 
+      reservationDate, 
+      reservationTime, 
+      notes,
+      // 🔹 NEW EXPENSE FIELDS
+      recipientName,
+      recipientPhone,
+      amount 
+    } = req.body;
 
     // Find the original sale
     const originalSale = await Sale.findById(id);
@@ -384,6 +486,66 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
 
+    // 🔹 HANDLE EXPENSE EDITING
+    if (originalSale.type === "expense" || type === "expense") {
+      if (!reason || !recipientName || !recipientPhone || !amount) {
+        return res.status(400).json({ 
+          error: "Expense requires reason, recipientName, recipientPhone, and amount" 
+        });
+      }
+
+      const expenseAmount = parseFloat(amount);
+      if (isNaN(expenseAmount) || expenseAmount <= 0) {
+        return res.status(400).json({ 
+          error: "Amount must be a positive number" 
+        });
+      }
+
+      // Track changes for audit
+      const changes = new Map();
+      
+      if (originalSale.reason !== reason) {
+        changes.set('reason', { from: originalSale.reason, to: reason });
+      }
+      if (originalSale.recipientName !== recipientName) {
+        changes.set('recipientName', { from: originalSale.recipientName, to: recipientName });
+      }
+      if (originalSale.recipientPhone !== recipientPhone) {
+        changes.set('recipientPhone', { from: originalSale.recipientPhone, to: recipientPhone });
+      }
+      if (originalSale.total !== expenseAmount) {
+        changes.set('total', { from: originalSale.total, to: expenseAmount });
+      }
+
+      const updatedExpense = await Sale.findByIdAndUpdate(
+        id,
+        {
+          reason,
+          recipientName,
+          recipientPhone,
+          subtotal: expenseAmount,
+          total: expenseAmount,
+          paymentMethod: normalizedPM,
+          notes: notes || originalSale.notes,
+          editedBy: req.user.userId,
+          editedAt: new Date(),
+          $push: {
+            editHistory: {
+              editedBy: req.user.userId,
+              editedAt: new Date(),
+              changes: Object.fromEntries(changes),
+              reason: reason || "Expense correction"
+            }
+          }
+        },
+        { new: true, runValidators: true }
+      );
+
+      return res.json(updatedExpense);
+    }
+
+    // 🔹 HANDLE REGULAR SALE EDITING (existing logic)
+    // ... [rest of the existing edit logic remains exactly the same] ...
     // Track changes for audit
     const changes = new Map();
 
@@ -614,12 +776,14 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Sale is already voided" });
     }
 
-    // Return stock to inventory
-    for (const item of sale.items) {
-      await Product.findByIdAndUpdate(
-        item.productId,
-        { $inc: { stock: item.quantity } }
-      );
+    // Return stock to inventory (only for sales with items)
+    if (sale.type === "sale" && sale.items && sale.items.length > 0) {
+      for (const item of sale.items) {
+        await Product.findByIdAndUpdate(
+          item.productId,
+          { $inc: { stock: item.quantity } }
+        );
+      }
     }
 
     const voidedSale = await Sale.findByIdAndUpdate(
@@ -640,8 +804,8 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
       { new: true }
     );
 
-    // FIX: Recalculate customer stats after voiding
-    if (sale.customerId) {
+    // FIX: Recalculate customer stats after voiding (only for sales, not expenses)
+    if (sale.customerId && sale.type === "sale") {
       await recalculateCustomerStats(sale.customerId);
     }
 
@@ -665,8 +829,8 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     
     await Sale.findByIdAndDelete(req.params.id);
 
-    // Update customer statistics
-    if (customerId) {
+    // Update customer statistics (only for sales, not expenses)
+    if (customerId && sale.type === "sale") {
       await recalculateCustomerStats(customerId);
     }
 

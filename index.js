@@ -6,13 +6,13 @@ const morgan = require("morgan");
 
 const app = express();
 const printRoutes = require('./routes/print');
+
 // Middleware
 app.use(express.json());
 app.use(morgan("combined"));
 
 // ✅ Allow both local dev + Netlify frontend
 app.use(cors());
-
 
 // Env variables
 const PORT = process.env.PORT || 5000;
@@ -27,6 +27,7 @@ app.use("/api/users", require("./routes/users"));
 app.use("/api/test", require("./routes/test"));
 app.use("/api/categories", require("./routes/categories"));
 app.use('/api/print', printRoutes);
+app.use("/api/expenses", require("./routes/expenses")); // ✅ Added expense routes
 
 // Default route
 app.get("/", (req, res) => {

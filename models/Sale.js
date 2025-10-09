@@ -4,25 +4,25 @@ const saleItemSchema = new mongoose.Schema({
   productId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Product",
-    required: true
+    required: false // Made optional for expenses
   },
   name: {
     type: String,
-    required: true
+    required: false // Made optional for expenses
   },
   quantity: {
     type: Number,
-    required: true,
+    required: false, // Made optional for expenses
     min: 1
   },
   price: {
     type: Number,
-    required: true,
+    required: false, // Made optional for expenses
     min: 0
   },
   total: {
     type: Number,
-    required: true,
+    required: false, // Made optional for expenses
     min: 0
   },
 });
@@ -36,12 +36,12 @@ const saleSchema = new mongoose.Schema({
   customer: {
     name: {
       type: String,
-      required: true,
+      required: false, // Made optional for expenses
       trim: true
     },
     phone: {
       type: String,
-      required: true,
+      required: false, // Made optional for expenses
       trim: true
     },
     email: {
@@ -58,7 +58,7 @@ const saleSchema = new mongoose.Schema({
   items: [saleItemSchema],
   subtotal: {
     type: Number,
-    required: true,
+    required: false, // Made optional for expenses
     min: 0
   },
   total: {
@@ -75,25 +75,41 @@ const saleSchema = new mongoose.Schema({
     type: String,
     unique: true
   },
-  // --- ADD SALES PERSON FIELD ---
   salesPerson: {
     type: String,
     required: true,
     trim: true,
-    default: "Admin" // Default value for existing sales
+    default: "Admin"
   },
   // --- UPDATED STATUS ENUM ---
   status: {
     type: String,
-    enum: ["completed", "refunded", "pending", "voided", "corrected"], // 🔹 Added "corrected"
+    enum: ["completed", "refunded", "pending", "voided", "corrected", "expense"], // 🔹 Added "expense"
     default: "completed"
   },
-  // --- NEW RESERVATION FIELDS ---
+  // --- UPDATED TYPE ENUM ---
   type: {
     type: String,
-    enum: ["sale", "reservation"],
+    enum: ["sale", "reservation", "expense"], // 🔹 Added "expense"
     default: "sale"
   },
+  // --- NEW EXPENSE FIELDS ---
+  reason: {
+    type: String,
+    required: false, // Will be required for expenses
+    trim: true
+  },
+  recipientName: {
+    type: String,
+    required: false, // Will be required for expenses
+    trim: true
+  },
+  recipientPhone: {
+    type: String,
+    required: false, // Will be required for expenses
+    trim: true
+  },
+  // --- EXISTING RESERVATION FIELDS ---
   reservationDate: {
     type: String,
     default: null
@@ -127,12 +143,12 @@ const saleSchema = new mongoose.Schema({
   // --- NEW FIELDS FOR SALE CORRECTION ---
   originalSaleId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "Sale", // 🔹 Points to the original sale this one is correcting
+    ref: "Sale",
     default: null
   },
   correctionSaleId: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: "Sale", // 🔹 Points to the sale that corrects this one
+    ref: "Sale",
     default: null
   },
   editedBy: {
@@ -167,16 +183,20 @@ const saleSchema = new mongoose.Schema({
 saleSchema.index({ createdAt: -1 });
 saleSchema.index({ "customer.phone": 1 });
 saleSchema.index({ saleId: 1 });
-saleSchema.index({ salesPerson: 1 }); // Add index for sales person
-saleSchema.index({ type: 1 }); // Add index for type (sale/reservation)
-saleSchema.index({ status: 1 }); // Add index for status
+saleSchema.index({ salesPerson: 1 });
+saleSchema.index({ type: 1 }); // Add index for type (sale/reservation/expense)
+saleSchema.index({ status: 1 });
 
-// Pre-save middleware to calculate item totals
+// Pre-save middleware to calculate item totals (only for sales with items)
 saleSchema.pre("save", function(next) {
-  // Calculate total for each item
-  this.items.forEach(item => {
-    item.total = item.price * item.quantity;
-  });
+  // Only calculate totals if this is a sale with items
+  if (this.type === "sale" && this.items && this.items.length > 0) {
+    this.items.forEach(item => {
+      if (item.price && item.quantity) {
+        item.total = item.price * item.quantity;
+      }
+    });
+  }
   
   next();
 });
