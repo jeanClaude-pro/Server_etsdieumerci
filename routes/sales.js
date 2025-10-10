@@ -451,8 +451,8 @@ router.get("/:id", authMiddleware, async (req, res) => {
 router.put("/:id", authMiddleware, async (req, res) => {
   try {
     // Check if user is admin
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Only admins can edit sales" });
+    if (req.user.role !== "admin" && req.user.role !== "manager") {
+      return res.status(403).json({ error: "Only admins and managers can edit sales" });
     }
 
     const { id } = req.params;
