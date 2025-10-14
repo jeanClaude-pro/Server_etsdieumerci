@@ -108,7 +108,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
       {
         $match: {
           createdAt: { $gte: startOfDay, $lte: endOfDay },
-          status: "completed",
+          status: type === "reservation" ? "pending" : "completed",
           type: "sale" // 🔹 Only include sales, not expenses
         },
       },
