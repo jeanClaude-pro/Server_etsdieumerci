@@ -108,7 +108,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
       {
         $match: {
           createdAt: { $gte: startOfDay, $lte: endOfDay },
-          status: type === "reservation" ? "pending" : "completed",
+          status: "completed",
           type: "sale" // 🔹 Only include sales, not expenses
         },
       },
@@ -271,7 +271,7 @@ router.post("/", authMiddleware, async (req, res) => {
     // FIX: Get customer ID from updateCustomerData and set customerId
     const customerId = await updateCustomerData(customer, total);
 
-    // UPDATED: Include type and reservation fields
+    // UPDATED: Include type and reservation fields WITH CORRECT STATUS
     const saleData = {
       saleId,
       saleNumber,
@@ -285,7 +285,7 @@ router.post("/", authMiddleware, async (req, res) => {
       subtotal,
       total,
       paymentMethod: normalizedPM,
-      status: "completed",
+      status: type === "reservation" ? "pending" : "completed", // ✅ FIXED: Reservations as pending
       salesPerson: salesPerson || "Admin",
       type: type || "sale",
       reservationDate: reservationDate || null,
@@ -447,14 +447,9 @@ router.get("/:id", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- EDIT SALE (Admin Only) ---------- **/
+/** ---------- EDIT SALE (Role-Based Restrictions) ---------- **/
 router.put("/:id", authMiddleware, async (req, res) => {
   try {
-    // Check if user is admin
-    if (req.user.role !== "admin" && req.user.role !== "manager") {
-      return res.status(403).json({ error: "Only admins and managers can edit sales" });
-    }
-
     const { id } = req.params;
     const { 
       customer, 
@@ -464,17 +459,33 @@ router.put("/:id", authMiddleware, async (req, res) => {
       type, 
       reservationDate, 
       reservationTime, 
-      notes,
-      // 🔹 NEW EXPENSE FIELDS
-      recipientName,
-      recipientPhone,
-      amount 
+      notes 
     } = req.body;
 
     // Find the original sale
     const originalSale = await Sale.findById(id);
     if (!originalSale) {
       return res.status(404).json({ error: "Sale not found" });
+    }
+
+    // 🔹 NEW: RESTRICTION FOR RESERVATIONS
+    if (originalSale.type === "reservation") {
+      const userRole = req.user.role;
+      
+      // If reservation is completed, only admin can edit
+      if (originalSale.status === "completed" && userRole !== "admin") {
+        return res.status(403).json({ 
+          error: "Only admin can edit completed reservations" 
+        });
+      }
+      
+      // If reservation is pending, only admin and manager can edit
+      if (originalSale.status === "pending" && 
+          userRole !== "admin" && userRole !== "manager") {
+        return res.status(403).json({ 
+          error: "Only admin and manager can edit pending reservations" 
+        });
+      }
     }
 
     // Prevent editing voided or corrected sales
@@ -544,8 +555,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return res.json(updatedExpense);
     }
 
-    // 🔹 HANDLE REGULAR SALE EDITING (existing logic)
-    // ... [rest of the existing edit logic remains exactly the same] ...
+    // 🔹 HANDLE REGULAR SALE EDITING
     // Track changes for audit
     const changes = new Map();
 
@@ -713,6 +723,16 @@ router.patch("/:id/complete", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Réservation non trouvée" });
     }
 
+    // 🔹 NEW: Check if it's actually a reservation
+    if (sale.type !== "reservation") {
+      return res.status(400).json({ error: "This is not a reservation" });
+    }
+
+    // 🔹 NEW: Check if already completed
+    if (sale.status === "completed") {
+      return res.status(400).json({ error: "Reservation already completed" });
+    }
+
     const updatedSale = await Sale.findByIdAndUpdate(
       id,
       {
@@ -738,6 +758,18 @@ router.patch("/:id/pending", authMiddleware, async (req, res) => {
     const sale = await Sale.findById(id);
     if (!sale) {
       return res.status(404).json({ error: "Réservation non trouvée" });
+    }
+
+    // 🔹 NEW: RESTRICTION - Only admin can return completed reservations to pending
+    if (sale.status === "completed" && req.user.role !== "admin") {
+      return res.status(403).json({ 
+        error: "Only admin can return completed reservations to pending" 
+      });
+    }
+
+    // 🔹 NEW: Check if it's actually a reservation
+    if (sale.type !== "reservation") {
+      return res.status(400).json({ error: "This is not a reservation" });
     }
 
     const updatedSale = await Sale.findByIdAndUpdate(
@@ -823,6 +855,13 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     
     if (!sale) {
       return res.status(404).json({ error: "Sale not found" });
+    }
+
+    // 🔹 NEW: RESTRICTION - Only admin can delete reservations
+    if (sale.type === "reservation" && req.user.role !== "admin") {
+      return res.status(403).json({ 
+        error: "Only admin can delete reservations" 
+      });
     }
 
     const customerId = sale.customerId;
