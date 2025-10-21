@@ -81,7 +81,7 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- GET ALL EXPENSES (with pagination & filtering) ---------- **/
+/** ---------- GET ALL EXPENSES (NO PAGINATION - returns all expenses) ---------- **/
 router.get("/", authMiddleware, async (req, res) => {
   try {
     const { 
@@ -89,9 +89,8 @@ router.get("/", authMiddleware, async (req, res) => {
       paymentMethod, 
       startDate, 
       endDate, 
-      search,
-      page = 1, 
-      limit = 50 
+      search
+      // REMOVED: page and limit parameters
     } = req.query;
 
     const filter = {};
@@ -123,29 +122,14 @@ router.get("/", authMiddleware, async (req, res) => {
       ];
     }
 
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const skip = (pageNum - 1) * limitNum;
-
+    // REMOVED PAGINATION: No skip, no limit - get ALL expenses
     const expenses = await Expense.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limitNum);
+      .sort({ createdAt: -1 });
+      // REMOVED: .skip(skip) and .limit(limitNum)
 
-    const total = await Expense.countDocuments(filter);
-    const totalPages = Math.ceil(total / limitNum);
+    // Return direct array of expenses (no pagination wrapper)
+    res.json(expenses);
     
-    res.json({
-      expenses,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total,
-        totalPages,
-        hasNext: pageNum < totalPages,
-        hasPrev: pageNum > 1
-      }
-    });
   } catch (error) {
     console.error("Error fetching expenses:", error);
     res.status(500).json({ error: "Failed to fetch expenses" });
