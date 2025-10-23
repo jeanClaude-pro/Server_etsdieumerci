@@ -108,8 +108,10 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
       {
         $match: {
           createdAt: { $gte: startOfDay, $lte: endOfDay },
-          status: "completed",
-          type: "sale" // 🔹 Only include sales, not expenses
+          // ✅ FIXED: INCLUDE PENDING RESERVATIONS (money already received)
+          status: { $in: ["completed", "pending"] },
+          // ✅ FIXED: INCLUDE BOTH SALES AND RESERVATIONS
+          type: { $in: ["sale", "reservation"] }
         },
       },
       {
@@ -124,8 +126,9 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
 
     const sales = await Sale.find({
       createdAt: { $gte: startOfDay, $lte: endOfDay },
-      status: "completed",
-      type: "sale" // 🔹 Only include sales, not expenses
+      // ✅ FIXED: SAME FILTER FOR CONSISTENCY
+      status: { $in: ["completed", "pending"] },
+      type: { $in: ["sale", "reservation"] }
     }).sort({ createdAt: -1 });
 
     res.json({
@@ -285,7 +288,7 @@ router.post("/", authMiddleware, async (req, res) => {
       subtotal,
       total,
       paymentMethod: normalizedPM,
-      status: type === "reservation" ? "pending" : "completed", // ✅ FIXED: Reservations as pending
+      status: type === "reservation" ? "pending" : "completed", // ✅ FIXED: Reservations as pending (money received)
       salesPerson: salesPerson || "Admin",
       type: type || "sale",
       reservationDate: reservationDate || null,
@@ -342,13 +345,16 @@ router.get("/", authMiddleware, async (req, res) => {
     if (status) {
       filter.status = status;
     } else {
-      // 🔹 Default filter: show completed sales AND expenses
-      filter.status = { $in: ["completed", "expense"] };
+      // ✅ FIXED: INCLUDE PENDING RESERVATIONS (money received) AND COMPLETED SALES
+      filter.status = { $in: ["completed", "pending", "expense"] };
     }
 
     // ADD TYPE FILTERING
     if (type) {
       filter.type = type;
+    } else {
+      // ✅ FIXED: INCLUDE BOTH SALES AND RESERVATIONS BY DEFAULT
+      filter.type = { $in: ["sale", "reservation", "expense"] };
     }
 
     if (dateFrom || dateTo) {
