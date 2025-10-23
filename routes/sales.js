@@ -814,8 +814,9 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Sale is already voided" });
     }
 
-    // Return stock to inventory (only for sales with items)
-    if (sale.type === "sale" && sale.items && sale.items.length > 0) {
+    // Return stock to inventory (only for sales and reservations with items)
+    // ✅ FIXED: Check for reservation type as well
+    if ((sale.type === "sale" || sale.type === "reservation") && sale.items && sale.items.length > 0) {
       for (const item of sale.items) {
         await Product.findByIdAndUpdate(
           item.productId,
@@ -842,8 +843,8 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
       { new: true }
     );
 
-    // FIX: Recalculate customer stats after voiding (only for sales, not expenses)
-    if (sale.customerId && sale.type === "sale") {
+    // FIX: Recalculate customer stats after voiding (only for sales and reservations)
+    if (sale.customerId && (sale.type === "sale" || sale.type === "reservation")) {
       await recalculateCustomerStats(sale.customerId);
     }
 
@@ -872,14 +873,53 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 
     const customerId = sale.customerId;
     
+    // ✅ FIXED: RETURN STOCK TO INVENTORY WHEN DELETING RESERVATIONS OR SALES
+    // Only return stock if the sale wasn't already voided (to avoid double return)
+    if ((sale.type === "reservation" || sale.type === "sale") && 
+        sale.items && sale.items.length > 0 && 
+        sale.status !== "voided") {
+      
+      console.log(`🔄 Returning stock for deleted ${sale.type}:`, {
+        saleId: sale._id,
+        itemsCount: sale.items.length,
+        items: sale.items.map(item => ({
+          productId: item.productId,
+          name: item.name,
+          quantity: item.quantity
+        }))
+      });
+      
+      for (const item of sale.items) {
+        try {
+          const updatedProduct = await Product.findByIdAndUpdate(
+            item.productId,
+            { $inc: { stock: item.quantity } },
+            { new: true }
+          );
+          
+          if (updatedProduct) {
+            console.log(`✅ Returned ${item.quantity} units of "${item.name}", new stock: ${updatedProduct.stock}`);
+          } else {
+            console.warn(`❌ Product not found for ID: ${item.productId}`);
+          }
+        } catch (productError) {
+          console.error(`Error returning stock for product ${item.productId}:`, productError);
+        }
+      }
+    }
+
+    // Delete the sale record
     await Sale.findByIdAndDelete(req.params.id);
 
-    // Update customer statistics (only for sales, not expenses)
-    if (customerId && sale.type === "sale") {
+    // Update customer statistics (only for sales and reservations, not expenses)
+    if (customerId && (sale.type === "sale" || sale.type === "reservation")) {
       await recalculateCustomerStats(customerId);
     }
 
-    res.json({ message: "Sale deleted successfully" });
+    res.json({ 
+      message: "Sale deleted successfully",
+      stockReturned: (sale.type === "reservation" || sale.type === "sale") && sale.items && sale.items.length > 0
+    });
   } catch (error) {
     console.error("Error deleting sale:", error);
     
