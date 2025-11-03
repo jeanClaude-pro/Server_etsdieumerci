@@ -3,6 +3,9 @@ const router = express.Router();
 const Expense = require("../models/Expense");
 const authMiddleware = require("../middleware/auth");
 
+// ✅ ADD EMAIL SERVICE IMPORT
+const { sendExpenseNotification } = require("../utils/emailService");
+
 // Helper function to normalize payment method
 function normalizePaymentMethod(pm) {
   const v = String(pm || "cash").toLowerCase();
@@ -66,6 +69,9 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const expense = new Expense(expenseData);
     const savedExpense = await expense.save();
+
+    // ✅ ADD EMAIL NOTIFICATION - Send to all admins
+    sendExpenseNotification(savedExpense);
 
     return res.status(201).json(savedExpense);
   } catch (error) {
@@ -405,6 +411,37 @@ router.get("/stats/summary", authMiddleware, async (req, res) => {
   } catch (error) {
     console.error("Error fetching expense statistics:", error);
     res.status(500).json({ error: "Failed to fetch expense statistics" });
+  }
+});
+
+// ✅ ADD TEST EMAIL ENDPOINT (Optional - for testing)
+router.get("/test/email", authMiddleware, async (req, res) => {
+  try {
+    // Create a test expense object
+    const testExpense = {
+      expenseId: "TEST-001",
+      reason: "Test Expense - Achat fournitures bureau",
+      recipientName: "Jean Test",
+      recipientPhone: "+243 81 234 5678",
+      amount: 150.50,
+      paymentMethod: "cash",
+      recordedBy: "test_user",
+      notes: "Ceci est un test du système d'email",
+      status: "pending",
+      createdAt: new Date()
+    };
+
+    await sendExpenseNotification(testExpense);
+    res.json({ 
+      success: true,
+      message: "✅ Test email sent to all admins! Check admin email inboxes." 
+    });
+  } catch (error) {
+    console.error("Test email error:", error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
   }
 });
 
