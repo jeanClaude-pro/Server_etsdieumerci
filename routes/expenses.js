@@ -2,9 +2,222 @@ const express = require("express");
 const router = express.Router();
 const Expense = require("../models/Expense");
 const authMiddleware = require("../middleware/auth");
+const nodemailer = require("nodemailer");
 
-// ✅ ADD EMAIL SERVICE IMPORT
-const { sendExpenseNotification } = require("../utils/emailService");
+// ✅ CREATE EMAIL TRANSPORTER
+const transporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST || "smtp.gmail.com",
+  port: process.env.EMAIL_PORT || 587,
+  secure: process.env.EMAIL_SECURE === "true",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// ✅ EMAIL FUNCTIONS
+async function sendExpenseNotification(expense) {
+  try {
+    const adminEmails = process.env.ADMIN_EMAILS ? 
+      process.env.ADMIN_EMAILS.split(',') : 
+      [process.env.DEFAULT_ADMIN_EMAIL || "admin@example.com"];
+    
+    const formattedAmount = new Intl.NumberFormat('fr-FR', {
+      style: 'currency',
+      currency: 'USD'
+    }).format(expense.amount);
+    
+    const mailOptions = {
+      from: process.env.EMAIL_FROM || "noreply@expenses.com",
+      to: adminEmails,
+      subject: `[NOUVELLE DÉPENSE] ${expense.expenseId} - ${expense.reason}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background-color: #4a6fa5; color: white; padding: 20px; text-align: center; }
+            .content { background-color: #f9f9f9; padding: 20px; border: 1px solid #ddd; }
+            .detail { margin-bottom: 10px; }
+            .label { font-weight: bold; color: #555; }
+            .footer { margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd; color: #777; font-size: 12px; }
+            .action { background-color: #d4edda; border: 1px solid #c3e6cb; padding: 10px; border-radius: 4px; margin: 10px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h2>Nouvelle Dépense Créée</h2>
+              <p>Dépense ID: ${expense.expenseId}</p>
+            </div>
+            <div class="content">
+              <div class="detail"><span class="label">Statut:</span> <strong>EN ATTENTE</strong></div>
+              <div class="detail"><span class="label">Raison:</span> ${expense.reason}</div>
+              <div class="detail"><span class="label">Bénéficiaire:</span> ${expense.recipientName}</div>
+              <div class="detail"><span class="label">Téléphone:</span> ${expense.recipientPhone}</div>
+              <div class="detail"><span class="label">Montant:</span> ${formattedAmount}</div>
+              <div class="detail"><span class="label">Méthode de paiement:</span> ${expense.paymentMethod}</div>
+              <div class="detail"><span class="label">Enregistré par:</span> ${expense.recordedBy}</div>
+              <div class="detail"><span class="label">Date:</span> ${new Date(expense.createdAt).toLocaleString('fr-FR')}</div>
+              
+              <div class="action">
+                <strong>Action Requise:</strong> Veuillez valider ou rejeter cette dépense dans le système.
+              </div>
+              
+              <p><a href="${process.env.APP_URL || 'http://localhost:3000'}/expenses">Cliquez ici pour accéder au système</a></p>
+            </div>
+            <div class="footer">
+              <p>Cet email a été envoyé automatiquement par le système de gestion des dépenses.</p>
+              <p>Ne pas répondre à cet email.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+    
+    await transporter.sendMail(mailOptions);
+    console.log(`New expense notification email sent for ${expense.expenseId}`);
+  } catch (error) {
+    console.error('Error sending expense notification email:', error);
+  }
+}
+
+async function sendExpenseUpdateNotification(expense, updatedBy, updateReason) {
+  try {
+    const adminEmails = process.env.ADMIN_EMAILS ? 
+      process.env.ADMIN_EMAILS.split(',') : 
+      [process.env.DEFAULT_ADMIN_EMAIL || "admin@example.com"];
+    
+    const formattedAmount = new Intl.NumberFormat('fr-FR', {
+      style: 'currency',
+      currency: 'USD'
+    }).format(expense.amount);
+    
+    const mailOptions = {
+      from: process.env.EMAIL_FROM || "noreply@expenses.com",
+      to: adminEmails,
+      subject: `[MISE À JOUR] Dépense ${expense.expenseId} mise à jour`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background-color: #4a6fa5; color: white; padding: 20px; text-align: center; }
+            .content { background-color: #f9f9f9; padding: 20px; border: 1px solid #ddd; }
+            .detail { margin-bottom: 10px; }
+            .label { font-weight: bold; color: #555; }
+            .footer { margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd; color: #777; font-size: 12px; }
+            .warning { background-color: #fff3cd; border: 1px solid #ffc107; padding: 10px; border-radius: 4px; margin: 10px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h2>Mise à Jour de Dépense</h2>
+              <p>Dépense ID: ${expense.expenseId}</p>
+            </div>
+            <div class="content">
+              <div class="detail"><span class="label">Statut:</span> ${expense.status}</div>
+              <div class="detail"><span class="label">Raison:</span> ${expense.reason}</div>
+              <div class="detail"><span class="label">Bénéficiaire:</span> ${expense.recipientName}</div>
+              <div class="detail"><span class="label">Montant:</span> ${formattedAmount}</div>
+              <div class="detail"><span class="label">Méthode de paiement:</span> ${expense.paymentMethod}</div>
+              <div class="detail"><span class="label">Mis à jour par:</span> ${updatedBy}</div>
+              <div class="detail"><span class="label">Raison de la mise à jour:</span> ${updateReason || 'Non spécifiée'}</div>
+              <div class="detail"><span class="label">Date de mise à jour:</span> ${new Date().toLocaleString('fr-FR')}</div>
+              
+              <div class="warning">
+                <strong>⚠️ Note:</strong> Cette dépense a été modifiée. Veuillez vérifier les détails mis à jour.
+              </div>
+            </div>
+            <div class="footer">
+              <p>Cet email a été envoyé automatiquement par le système de gestion des dépenses.</p>
+              <p>Ne pas répondre à cet email.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+    
+    await transporter.sendMail(mailOptions);
+    console.log(`Update notification email sent for expense ${expense.expenseId}`);
+  } catch (error) {
+    console.error('Error sending update notification email:', error);
+  }
+}
+
+async function sendExpenseDeletionNotification(expenseInfo, deletedBy) {
+  try {
+    const adminEmails = process.env.ADMIN_EMAILS ? 
+      process.env.ADMIN_EMAILS.split(',') : 
+      [process.env.DEFAULT_ADMIN_EMAIL || "admin@example.com"];
+    
+    const formattedAmount = new Intl.NumberFormat('fr-FR', {
+      style: 'currency',
+      currency: 'USD'
+    }).format(expenseInfo.amount);
+    
+    const mailOptions = {
+      from: process.env.EMAIL_FROM || "noreply@expenses.com",
+      to: adminEmails,
+      subject: `[SUPPRESSION] Dépense ${expenseInfo.expenseId} supprimée`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background-color: #dc3545; color: white; padding: 20px; text-align: center; }
+            .content { background-color: #f9f9f9; padding: 20px; border: 1px solid #ddd; }
+            .detail { margin-bottom: 10px; }
+            .label { font-weight: bold; color: #555; }
+            .footer { margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd; color: #777; font-size: 12px; }
+            .alert { background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; border-radius: 4px; margin: 10px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h2>Suppression de Dépense</h2>
+              <p>Dépense ID: ${expenseInfo.expenseId}</p>
+            </div>
+            <div class="content">
+              <div class="alert">
+                <strong>⚠️ ALERTE:</strong> Cette dépense a été supprimée définitivement du système.
+              </div>
+              
+              <div class="detail"><span class="label">Ancien statut:</span> ${expenseInfo.status}</div>
+              <div class="detail"><span class="label">Raison:</span> ${expenseInfo.reason}</div>
+              <div class="detail"><span class="label">Bénéficiaire:</span> ${expenseInfo.recipientName}</div>
+              <div class="detail"><span class="label">Montant:</span> ${formattedAmount}</div>
+              <div class="detail"><span class="label">Supprimé par:</span> ${deletedBy}</div>
+              <div class="detail"><span class="label">Date de suppression:</span> ${new Date().toLocaleString('fr-FR')}</div>
+              
+              <p><strong>Note:</strong> Cette action est permanente et ne peut pas être annulée.</p>
+            </div>
+            <div class="footer">
+              <p>Cet email a été envoyé automatiquement par le système de gestion des dépenses.</p>
+              <p>Ne pas répondre à cet email.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    };
+    
+    await transporter.sendMail(mailOptions);
+    console.log(`Deletion notification email sent for expense ${expenseInfo.expenseId}`);
+  } catch (error) {
+    console.error('Error sending deletion notification email:', error);
+  }
+}
 
 // Helper function to normalize payment method
 function normalizePaymentMethod(pm) {
@@ -12,7 +225,7 @@ function normalizePaymentMethod(pm) {
   if (v === "cash") return "cash";
   if (v === "card") return "card";
   if (["mpesa", "m-pesa", "bank", "transfer", "wire", "bank transfer"].includes(v)) {
-    return "bank"; // Fixed to match model enum
+    return "bank";
   }
   return "other";
 }
@@ -20,6 +233,11 @@ function normalizePaymentMethod(pm) {
 // Helper function to sanitize input
 function sanitizeInput(input) {
   return String(input || "").trim();
+}
+
+// Helper to check if user is admin
+function isAdminUser(user) {
+  return user && (user.role === 'admin' || user.isAdmin === true || user.canValidate === true);
 }
 
 /** ---------- CREATE EXPENSE ---------- **/
@@ -64,13 +282,14 @@ router.post("/", authMiddleware, async (req, res) => {
       amount: expenseAmount,
       paymentMethod: normalizedPM,
       recordedBy: sanitizedRecordedBy,
-      notes: sanitizedNotes
+      notes: sanitizedNotes,
+      status: "pending"
     };
 
     const expense = new Expense(expenseData);
     const savedExpense = await expense.save();
 
-    // ✅ ADD EMAIL NOTIFICATION - Send to all admins
+    // Send email notification
     sendExpenseNotification(savedExpense);
 
     return res.status(201).json(savedExpense);
@@ -96,7 +315,6 @@ router.get("/", authMiddleware, async (req, res) => {
       startDate, 
       endDate, 
       search
-      // REMOVED: page and limit parameters
     } = req.query;
 
     const filter = {};
@@ -128,12 +346,7 @@ router.get("/", authMiddleware, async (req, res) => {
       ];
     }
 
-    // REMOVED PAGINATION: No skip, no limit - get ALL expenses
-    const expenses = await Expense.find(filter)
-      .sort({ createdAt: -1 });
-      // REMOVED: .skip(skip) and .limit(limitNum)
-
-    // Return direct array of expenses (no pagination wrapper)
+    const expenses = await Expense.find(filter).sort({ createdAt: -1 });
     res.json(expenses);
     
   } catch (error) {
@@ -164,7 +377,7 @@ router.patch("/:id/validate", authMiddleware, async (req, res) => {
   try {
     const { validatedBy, notes } = req.body;
     
-    // Check authorization (assuming user object has role/permissions)
+    // Check authorization
     if (req.user && !req.user.canValidate) {
       return res.status(403).json({ error: "Insufficient permissions to validate expenses" });
     }
@@ -257,12 +470,12 @@ router.patch("/:id/reject", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- UPDATE EXPENSE ---------- **/
+/** ---------- UPDATE EXPENSE (ENHANCED FOR ALL STATUSES WITH ADMIN CHECK) ---------- **/
 router.put("/:id", authMiddleware, async (req, res) => {
   try {
-    const { reason, recipientName, recipientPhone, amount, paymentMethod, notes } = req.body;
+    const { reason, recipientName, recipientPhone, amount, paymentMethod, notes, updateReason } = req.body;
 
-    // Validation
+    // Validation - FIXED TYPO HERE
     if (!reason || !recipientName || !recipientPhone || !amount) {
       return res.status(400).json({ 
         error: "Reason, recipientName, recipientPhone, and amount are required" 
@@ -281,36 +494,80 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const sanitizedRecipientName = sanitizeInput(recipientName);
     const sanitizedRecipientPhone = sanitizeInput(recipientPhone).replace(/\s+/g, "");
     const sanitizedNotes = sanitizeInput(notes);
+    const sanitizedUpdateReason = sanitizeInput(updateReason);
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
 
-    // Check if expense exists and can be updated
+    // Check if expense exists
     const existingExpense = await Expense.findById(req.params.id);
     if (!existingExpense) {
       return res.status(404).json({ error: "Expense not found" });
     }
 
-    // Prevent updating validated or rejected expenses
+    // Authorization check for editing validated/rejected expenses
     if (existingExpense.status !== "pending") {
-      return res.status(400).json({ 
-        error: `Cannot update ${existingExpense.status} expense. Only pending expenses can be modified.` 
+      // Only admins can edit validated or rejected expenses
+      if (!isAdminUser(req.user)) {
+        return res.status(403).json({ 
+          error: "Only administrators can edit validated or rejected expenses" 
+        });
+      }
+      
+      // Require update reason for admin edits of validated/rejected expenses
+      if (!sanitizedUpdateReason) {
+        return res.status(400).json({ 
+          error: "Update reason is required when editing validated or rejected expenses" 
+        });
+      }
+    }
+
+    // Check if the current user is the one who recorded it (for pending expenses)
+    if (existingExpense.status === "pending" && 
+        existingExpense.recordedBy !== req.user?.id && 
+        !isAdminUser(req.user)) {
+      return res.status(403).json({ 
+        error: "You can only edit your own pending expenses" 
       });
+    }
+
+    // Prepare update data
+    const updateData = {
+      reason: sanitizedReason,
+      recipientName: sanitizedRecipientName,
+      recipientPhone: sanitizedRecipientPhone,
+      amount: expenseAmount,
+      paymentMethod: normalizedPM,
+      updatedAt: new Date()
+    };
+
+    // Add notes with update history
+    const updateNote = sanitizedUpdateReason ? 
+      `[${new Date().toISOString()}] Updated by ${req.user?.id || "Unknown"}: ${sanitizedUpdateReason}` : 
+      `[${new Date().toISOString()}] Updated by ${req.user?.id || "Unknown"}`;
+    
+    updateData.notes = existingExpense.notes ? 
+      `${existingExpense.notes}\n${updateNote}` : 
+      updateNote;
+
+    // If admin is editing a validated expense, keep it validated but update validator info
+    if (existingExpense.status === "validated" && isAdminUser(req.user)) {
+      updateData.validatedBy = `${existingExpense.validatedBy || "Admin"} (Modified by: ${req.user?.id || "Admin"})`;
+      updateData.validatedAt = new Date();
     }
 
     const updatedExpense = await Expense.findByIdAndUpdate(
       req.params.id,
-      {
-        reason: sanitizedReason,
-        recipientName: sanitizedRecipientName,
-        recipientPhone: sanitizedRecipientPhone,
-        amount: expenseAmount,
-        paymentMethod: normalizedPM,
-        notes: sanitizedNotes
-      },
+      updateData,
       { new: true, runValidators: true }
     );
 
-    res.json(updatedExpense);
+    // Send update notification
+    sendExpenseUpdateNotification(updatedExpense, req.user?.id || "Unknown", sanitizedUpdateReason);
+
+    res.json({
+      ...updatedExpense.toObject(),
+      message: "Expense updated successfully"
+    });
   } catch (error) {
     console.error("Error updating expense:", error);
     if (error.name === "CastError") {
@@ -324,7 +581,51 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- DELETE EXPENSE ---------- **/
+/** ---------- ADMIN DELETE EXPENSE (FOR ANY STATUS) ---------- **/
+router.delete("/:id/admin", authMiddleware, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!isAdminUser(req.user)) {
+      return res.status(403).json({ 
+        error: "Only administrators can delete expenses of any status" 
+      });
+    }
+
+    const expense = await Expense.findById(req.params.id);
+    if (!expense) {
+      return res.status(404).json({ error: "Expense not found" });
+    }
+
+    // Store expense info for response before deletion
+    const deletedExpenseInfo = {
+      id: expense._id,
+      expenseId: expense.expenseId,
+      reason: expense.reason,
+      amount: expense.amount,
+      status: expense.status,
+      recipientName: expense.recipientName
+    };
+
+    await Expense.findByIdAndDelete(req.params.id);
+
+    // Send deletion notification
+    sendExpenseDeletionNotification(deletedExpenseInfo, req.user?.id || "Admin");
+
+    res.json({ 
+      success: true,
+      message: "Expense permanently deleted by administrator",
+      deletedExpense: deletedExpenseInfo
+    });
+  } catch (error) {
+    console.error("Error deleting expense (admin):", error);
+    if (error.name === "CastError") {
+      return res.status(400).json({ error: "Invalid expense ID" });
+    }
+    res.status(500).json({ error: "Failed to delete expense" });
+  }
+});
+
+/** ---------- REGULAR DELETE EXPENSE (FOR PENDING ONLY) ---------- **/
 router.delete("/:id", authMiddleware, async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
@@ -332,10 +633,17 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Expense not found" });
     }
 
-    // Prevent deleting validated or rejected expenses
+    // Prevent deleting validated or rejected expenses via regular route
     if (expense.status !== "pending") {
       return res.status(400).json({ 
-        error: `Cannot delete ${expense.status} expense. Only pending expenses can be deleted.` 
+        error: `Cannot delete ${expense.status} expense via this route. Only pending expenses can be deleted. Use /admin route for admin deletion.` 
+      });
+    }
+
+    // Check if the current user is the one who recorded it
+    if (expense.recordedBy !== req.user?.id && !isAdminUser(req.user)) {
+      return res.status(403).json({ 
+        error: "You can only delete your own pending expenses" 
       });
     }
 
@@ -414,7 +722,45 @@ router.get("/stats/summary", authMiddleware, async (req, res) => {
   }
 });
 
-// ✅ ADD TEST EMAIL ENDPOINT (Optional - for testing)
+/** ---------- GET EXPENSE HISTORY/AUDIT LOG ---------- **/
+router.get("/:id/history", authMiddleware, async (req, res) => {
+  try {
+    const expense = await Expense.findById(req.params.id);
+    if (!expense) {
+      return res.status(404).json({ error: "Expense not found" });
+    }
+
+    // Extract history from notes (assuming notes contain history)
+    const notes = expense.notes || "";
+    const historyLines = notes.split('\n').filter(line => line.trim());
+    
+    const history = historyLines.map(line => {
+      const timestampMatch = line.match(/\[(.*?)\]/);
+      const timestamp = timestampMatch ? timestampMatch[1] : new Date().toISOString();
+      const action = line.replace(/\[.*?\]/, '').trim();
+      
+      return {
+        timestamp,
+        action,
+        formattedDate: new Date(timestamp).toLocaleString('fr-FR')
+      };
+    });
+
+    res.json({
+      expenseId: expense.expenseId,
+      currentStatus: expense.status,
+      history
+    });
+  } catch (error) {
+    console.error("Error fetching expense history:", error);
+    if (error.name === "CastError") {
+      return res.status(400).json({ error: "Invalid expense ID" });
+    }
+    res.status(500).json({ error: "Failed to fetch expense history" });
+  }
+});
+
+/** ---------- TEST EMAIL ENDPOINT ---------- **/
 router.get("/test/email", authMiddleware, async (req, res) => {
   try {
     // Create a test expense object
@@ -442,6 +788,86 @@ router.get("/test/email", authMiddleware, async (req, res) => {
       success: false,
       error: error.message 
     });
+  }
+});
+
+/** ---------- TEST UPDATE EMAIL ENDPOINT ---------- **/
+router.get("/test/email-update", authMiddleware, async (req, res) => {
+  try {
+    // Create a test expense object
+    const testExpense = {
+      expenseId: "TEST-002",
+      reason: "Test Expense Update - Réparation équipement",
+      recipientName: "Marie Test",
+      recipientPhone: "+243 82 345 6789",
+      amount: 250.75,
+      paymentMethod: "bank",
+      recordedBy: "test_user",
+      notes: "Ceci est un test du système d'email de mise à jour",
+      status: "validated",
+      validatedBy: "admin_user",
+      validatedAt: new Date(),
+      createdAt: new Date()
+    };
+
+    await sendExpenseUpdateNotification(testExpense, "admin_user", "Correction du montant");
+    res.json({ 
+      success: true,
+      message: "✅ Test update email sent to all admins! Check admin email inboxes." 
+    });
+  } catch (error) {
+    console.error("Test update email error:", error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
+  }
+});
+
+/** ---------- TEST DELETE EMAIL ENDPOINT ---------- **/
+router.get("/test/email-delete", authMiddleware, async (req, res) => {
+  try {
+    // Create a test expense info object
+    const testExpenseInfo = {
+      id: "test_id_123",
+      expenseId: "TEST-003",
+      reason: "Test Expense Delete - Achat matériel",
+      amount: 99.99,
+      status: "validated",
+      recipientName: "Pierre Test"
+    };
+
+    await sendExpenseDeletionNotification(testExpenseInfo, "admin_user");
+    res.json({ 
+      success: true,
+      message: "✅ Test delete email sent to all admins! Check admin email inboxes." 
+    });
+  } catch (error) {
+    console.error("Test delete email error:", error);
+    res.status(500).json({ 
+      success: false,
+      error: error.message 
+    });
+  }
+});
+
+/** ---------- GET USER PERMISSIONS ENDPOINT ---------- **/
+router.get("/permissions/me", authMiddleware, async (req, res) => {
+  try {
+    const user = req.user || {};
+    const permissions = {
+      isAdmin: isAdminUser(user),
+      canValidate: user.canValidate || false,
+      canEditAll: isAdminUser(user),
+      canDeleteAll: isAdminUser(user),
+      userId: user.id || "unknown",
+      userName: user.name || user.email || "Unknown User"
+    };
+    
+    res.json(permissions);
+  } catch (error) {
+    console.error("Error getting user permissions:", error);
+    res.status(500).json({ error: "Failed to get user permissions" });
   }
 });
 
