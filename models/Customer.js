@@ -36,7 +36,7 @@ const customerSchema = new mongoose.Schema({
 });
 
 // Create index for better query performance
-customerSchema.index({ phone: 1 });
+// NOTE: Removed duplicate index for phone (already created by unique: true)
 customerSchema.index({ name: "text" });
 customerSchema.index({ totalSpent: -1 });
 

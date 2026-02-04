@@ -100,8 +100,8 @@ const entrySchema = new mongoose.Schema({
 });
 
 // Indexes for performance (like your Sale model)
+// NOTE: Removed duplicate index for entryId (already created by unique: true)
 entrySchema.index({ createdAt: -1 });
-entrySchema.index({ entryId: 1 });
 entrySchema.index({ status: 1 });
 entrySchema.index({ category: 1 });
 entrySchema.index({ "receivedFrom.phone": 1 });

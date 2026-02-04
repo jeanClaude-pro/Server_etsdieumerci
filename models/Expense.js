@@ -58,8 +58,8 @@ const expenseSchema = new mongoose.Schema({
 });
 
 // Create index for better query performance
+// NOTE: Removed duplicate index for expenseId (already created by unique: true)
 expenseSchema.index({ createdAt: -1 });
-expenseSchema.index({ expenseId: 1 });
 expenseSchema.index({ status: 1 });
 expenseSchema.index({ recordedBy: 1 });
 

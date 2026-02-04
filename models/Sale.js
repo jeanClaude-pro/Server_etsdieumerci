@@ -31,7 +31,7 @@ const saleSchema = new mongoose.Schema({
   saleId: {
     type: String,
     required: true,
-    unique: true
+    unique: true  // ← THIS creates an index automatically
   },
   customer: {
     name: {
@@ -43,6 +43,7 @@ const saleSchema = new mongoose.Schema({
       type: String,
       required: false, // Made optional for expenses
       trim: true
+      // REMOVED: index: true  ← Fixed: removed duplicate index
     },
     email: {
       type: String,
@@ -73,7 +74,7 @@ const saleSchema = new mongoose.Schema({
   },
   saleNumber: {
     type: String,
-    unique: true
+    unique: true  // ← THIS also creates an index automatically
   },
   salesPerson: {
     type: String,
@@ -181,8 +182,8 @@ const saleSchema = new mongoose.Schema({
 
 // Create index for better query performance
 saleSchema.index({ createdAt: -1 });
-saleSchema.index({ "customer.phone": 1 });
-saleSchema.index({ saleId: 1 });
+saleSchema.index({ "customer.phone": 1 }); // Keep this explicit index
+// REMOVED: saleSchema.index({ saleId: 1 }); ← DUPLICATE of unique: true on line 27
 saleSchema.index({ salesPerson: 1 });
 saleSchema.index({ type: 1 }); // Add index for type (sale/reservation/expense)
 saleSchema.index({ status: 1 });

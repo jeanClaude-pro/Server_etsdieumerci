@@ -7,6 +7,30 @@ const Customer = require("../models/Customer");
 const Product = require("../models/Product");
 const authMiddleware = require("../middleware/auth");
 
+// Query validation middleware
+const validateSalesQuery = (req, res, next) => {
+  const { limit = 20 } = req.query;
+  
+  // Prevent limit=0 or very large limits
+  const parsedLimit = parseInt(limit, 10);
+  
+  if (parsedLimit === 0) {
+    return res.status(400).json({
+      error: "Limit cannot be 0. Use pagination instead.",
+      suggestion: "Use ?page=1&limit=20"
+    });
+  }
+  
+  if (parsedLimit > 1000) {
+    return res.status(400).json({
+      error: "Limit too high. Maximum allowed is 1000.",
+      suggestion: "Use ?page=1&limit=50 for better performance"
+    });
+  }
+  
+  next();
+};
+
 // normalize to the Sale model enum
 function normalizePaymentMethod(pm) {
   const v = String(pm || "cash").toLowerCase();
@@ -60,7 +84,10 @@ async function recalculateCustomerStats(customerId) {
     const sales = await Sale.find({ 
       customerId: customerId,
       status: { $in: ["completed", "pending", undefined, null] } // Only valid sales
-    }).sort({ createdAt: 1 });
+    })
+    .sort({ createdAt: 1 })
+    .select('total status type createdAt') // Only select needed fields
+    .lean();
     
     // Additional safety filter
     const validSales = sales.filter(sale => 
@@ -124,12 +151,17 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
       },
     ]);
 
+    // Limit sales returned to avoid memory issues
     const sales = await Sale.find({
       createdAt: { $gte: startOfDay, $lte: endOfDay },
       // ✅ FIXED: SAME FILTER FOR CONSISTENCY
       status: { $in: ["completed", "pending"] },
       type: { $in: ["sale", "reservation"] }
-    }).sort({ createdAt: -1 });
+    })
+    .sort({ createdAt: -1 })
+    .limit(100) // Limit daily sales returned
+    .select('-__v') // Exclude version key
+    .lean();
 
     res.json({
       date: targetDate.toISOString().split("T")[0],
@@ -323,21 +355,21 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- LIST SALES ---------- **/
-router.get("/", authMiddleware, async (req, res) => {
+/** ---------- LIST SALES (WITH PAGINATION AND MEMORY OPTIMIZATION) ---------- **/
+router.get("/", authMiddleware, validateSalesQuery, async (req, res) => {
   try {
     const { 
       page = 1, 
-      limit = 20, 
+      limit = 50, // Increased default for better UX
       customerPhone, 
       dateFrom, 
       dateTo,
       status,
-      type // ADD TYPE FILTER
+      type
     } = req.query;
     
-    const p = parseInt(page, 10);
-    const l = parseInt(limit, 10);
+    const p = Math.max(1, parseInt(page, 10));
+    const l = Math.min(parseInt(limit, 10), 1000); // Max 1000 per request
     const filter = {};
 
     if (customerPhone) filter["customer.phone"] = customerPhone;
@@ -363,27 +395,59 @@ router.get("/", authMiddleware, async (req, res) => {
       if (dateTo) filter.createdAt.$lte = new Date(dateTo);
     }
 
-    const sales = await Sale.find(filter)
-      .skip((p - 1) * l)
-      .limit(l)
-      .sort({ createdAt: -1 });
+    // Use Promise.all for parallel execution
+    const [sales, totalSales] = await Promise.all([
+      Sale.find(filter)
+        .select('-__v') // Exclude version key
+        .skip((p - 1) * l)
+        .limit(l)
+        .sort({ createdAt: -1 })
+        .lean(), // Use lean for better performance
+      Sale.countDocuments(filter)
+    ]);
 
-    const totalSales = await Sale.countDocuments(filter);
+    // Calculate pagination metadata
+    const totalPages = Math.ceil(totalSales / l);
+    const hasNextPage = p < totalPages;
+    const hasPrevPage = p > 1;
 
     res.json({
-      sales,
-      pagination: { total: totalSales, page: p, limit: l },
+      success: true,
+      data: sales,
+      pagination: { 
+        currentPage: p, 
+        limit: l,
+        total: totalSales,
+        totalPages,
+        hasNextPage,
+        hasPrevPage,
+        nextPage: hasNextPage ? p + 1 : null,
+        prevPage: hasPrevPage ? p - 1 : null
+      },
+      // Include performance hint for large datasets
+      performanceHint: totalSales > 10000 ? 
+        "Consider adding date filters for better performance" : null
     });
   } catch (error) {
     console.error("Error fetching sales:", error);
-    res.status(500).json({ error: "Failed to fetch sales" });
+    res.status(500).json({ 
+      error: "Failed to fetch sales",
+      suggestion: "Try adding date filters or reducing limit parameter"
+    });
   }
 });
 
-/** ---------- GET EXPENSES ---------- **/
+/** ---------- GET EXPENSES (WITH PAGINATION) ---------- **/
 router.get("/expenses/all", authMiddleware, async (req, res) => {
   try {
-    const { status } = req.query;
+    const { 
+      page = 1, 
+      limit = 50,
+      status 
+    } = req.query;
+    
+    const p = Math.max(1, parseInt(page, 10));
+    const l = Math.min(parseInt(limit, 10), 500);
     
     const filter = { type: "expense" };
     
@@ -391,20 +455,45 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
       filter.status = status;
     }
 
-    const expenses = await Sale.find(filter)
-      .sort({ createdAt: -1 });
+    const [expenses, total] = await Promise.all([
+      Sale.find(filter)
+        .select('-__v -items') // Expenses don't have items
+        .skip((p - 1) * l)
+        .limit(l)
+        .sort({ createdAt: -1 })
+        .lean(),
+      Sale.countDocuments(filter)
+    ]);
 
-    res.json(expenses);
+    const totalPages = Math.ceil(total / l);
+
+    res.json({
+      success: true,
+      data: expenses,
+      pagination: {
+        currentPage: p,
+        limit: l,
+        total,
+        totalPages
+      }
+    });
   } catch (error) {
     console.error("Error fetching expenses:", error);
     res.status(500).json({ error: "Failed to fetch expenses" });
   }
 });
 
-/** ---------- GET RESERVATIONS ---------- **/
+/** ---------- GET RESERVATIONS (WITH PAGINATION) ---------- **/
 router.get("/reservations/all", authMiddleware, async (req, res) => {
   try {
-    const { status } = req.query;
+    const { 
+      page = 1, 
+      limit = 50,
+      status 
+    } = req.query;
+    
+    const p = Math.max(1, parseInt(page, 10));
+    const l = Math.min(parseInt(limit, 10), 500);
     
     const filter = { type: "reservation" };
     
@@ -412,10 +501,28 @@ router.get("/reservations/all", authMiddleware, async (req, res) => {
       filter.status = status;
     }
 
-    const reservations = await Sale.find(filter)
-      .sort({ createdAt: -1 });
+    const [reservations, total] = await Promise.all([
+      Sale.find(filter)
+        .select('-__v') // Exclude version key
+        .skip((p - 1) * l)
+        .limit(l)
+        .sort({ createdAt: -1 })
+        .lean(),
+      Sale.countDocuments(filter)
+    ]);
 
-    res.json(reservations);
+    const totalPages = Math.ceil(total / l);
+
+    res.json({
+      success: true,
+      data: reservations,
+      pagination: {
+        currentPage: p,
+        limit: l,
+        total,
+        totalPages
+      }
+    });
   } catch (error) {
     console.error("Error fetching reservations:", error);
     res.status(500).json({ error: "Failed to fetch reservations" });
@@ -427,29 +534,47 @@ router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const saleId = req.params.id;
     
-    const sale = await Sale.findById(saleId);
+    const sale = await Sale.findById(saleId)
+      .select('-__v') // Exclude version key
+      .lean();
+    
     if (!sale) {
       return res.status(404).json({ error: "Sale not found" });
     }
 
-    // Check if there are duplicate sales
-    const potentialDuplicates = await Sale.find({
-      saleId: sale.saleId,
-      _id: { $ne: saleId } // Exclude current sale
-    });
+    // Only check for duplicates if needed
+    let potentialDuplicates = [];
+    let duplicateCount = 0;
+    
+    if (sale.saleId) {
+      potentialDuplicates = await Sale.find({
+        saleId: sale.saleId,
+        _id: { $ne: saleId }
+      })
+      .select('_id saleId createdAt status')
+      .lean();
+      
+      duplicateCount = potentialDuplicates.length;
+    }
 
     res.json({
-      sale: sale,
-      potentialDuplicates: potentialDuplicates,
-      duplicateCount: potentialDuplicates.length,
-      message: potentialDuplicates.length > 0 ? 
-        `Found ${potentialDuplicates.length} potential duplicates` : 
+      success: true,
+      data: sale,
+      duplicates: {
+        count: duplicateCount,
+        items: potentialDuplicates
+      },
+      message: duplicateCount > 0 ? 
+        `Found ${duplicateCount} potential duplicates` : 
         "No duplicates found"
     });
 
   } catch (error) {
-    console.error("Error debugging sale:", error);
-    res.status(500).json({ error: "Failed to debug sale" });
+    console.error("Error fetching sale:", error);
+    if (error.name === "CastError") {
+      return res.status(400).json({ error: "Invalid sale ID format" });
+    }
+    res.status(500).json({ error: "Failed to fetch sale" });
   }
 });
 
@@ -465,11 +590,15 @@ router.put("/:id", authMiddleware, async (req, res) => {
       type, 
       reservationDate, 
       reservationTime, 
-      notes 
+      notes,
+      // Expense fields
+      recipientName,
+      recipientPhone,
+      amount
     } = req.body;
 
     // Find the original sale
-    const originalSale = await Sale.findById(id);
+    const originalSale = await Sale.findById(id).lean();
     if (!originalSale) {
       return res.status(404).json({ error: "Sale not found" });
     }
@@ -724,7 +853,7 @@ router.patch("/:id/complete", authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { completedBy } = req.body;
 
-    const sale = await Sale.findById(id);
+    const sale = await Sale.findById(id).lean();
     if (!sale) {
       return res.status(404).json({ error: "Réservation non trouvée" });
     }
@@ -761,7 +890,7 @@ router.patch("/:id/pending", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const sale = await Sale.findById(id);
+    const sale = await Sale.findById(id).lean();
     if (!sale) {
       return res.status(404).json({ error: "Réservation non trouvée" });
     }
@@ -805,7 +934,7 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
 
-    const sale = await Sale.findById(id);
+    const sale = await Sale.findById(id).lean();
     if (!sale) {
       return res.status(404).json({ error: "Sale not found" });
     }
@@ -858,7 +987,7 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
 /** ---------- DELETE SALE ---------- **/
 router.delete("/:id", authMiddleware, async (req, res) => {
   try {
-    const sale = await Sale.findById(req.params.id);
+    const sale = await Sale.findById(req.params.id).lean();
     
     if (!sale) {
       return res.status(404).json({ error: "Sale not found" });
@@ -917,6 +1046,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     }
 
     res.json({ 
+      success: true,
       message: "Sale deleted successfully",
       stockReturned: (sale.type === "reservation" || sale.type === "sale") && sale.items && sale.items.length > 0
     });
