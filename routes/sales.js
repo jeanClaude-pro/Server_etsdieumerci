@@ -7,30 +7,6 @@ const Customer = require("../models/Customer");
 const Product = require("../models/Product");
 const authMiddleware = require("../middleware/auth");
 
-// Query validation middleware
-const validateSalesQuery = (req, res, next) => {
-  const { limit = 20 } = req.query;
-  
-  // Prevent limit=0 or very large limits
-  const parsedLimit = parseInt(limit, 10);
-  
-  if (parsedLimit === 0) {
-    return res.status(400).json({
-      error: "Limit cannot be 0. Use pagination instead.",
-      suggestion: "Use ?page=1&limit=20"
-    });
-  }
-  
-  if (parsedLimit > 1000) {
-    return res.status(400).json({
-      error: "Limit too high. Maximum allowed is 1000.",
-      suggestion: "Use ?page=1&limit=50 for better performance"
-    });
-  }
-  
-  next();
-};
-
 // normalize to the Sale model enum
 function normalizePaymentMethod(pm) {
   const v = String(pm || "cash").toLowerCase();
@@ -121,6 +97,297 @@ async function recalculateCustomerStats(customerId) {
   }
 }
 
+// ==================== TIME FRAME HELPER FUNCTIONS ====================
+
+/**
+ * Parse date string and set appropriate time boundaries
+ * @param {string} dateStr - Date in YYYY-MM-DD format
+ * @param {boolean} isEndDate - If true, sets to end of day (23:59:59.999)
+ * @returns {Date} Parsed date object
+ */
+function parseDate(dateStr, isEndDate = false) {
+  if (!dateStr) return null;
+  
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) {
+    throw new Error(`Invalid date format: ${dateStr}. Use YYYY-MM-DD format.`);
+  }
+  
+  if (isEndDate) {
+    date.setHours(23, 59, 59, 999);
+  } else {
+    date.setHours(0, 0, 0, 0);
+  }
+  
+  return date;
+}
+
+/**
+ * Build date range filter based on timeframe parameters
+ * Follows priority: custom range > specific day > month > year > today
+ * @param {Object} query - Request query parameters
+ * @returns {Object} MongoDB date filter { createdAt: { $gte, $lte } }
+ */
+function buildTimeframeFilter(query) {
+  const { from, to, date, year, month } = query;
+  
+  // Priority 1: Custom date range (from and to)
+  if (from || to) {
+    const startDate = from ? parseDate(from, false) : new Date(0); // Beginning of time
+    const endDate = to ? parseDate(to, true) : new Date(); // Current date/time
+    
+    if (from && to && startDate > endDate) {
+      throw new Error("Start date (from) must be before or equal to end date (to)");
+    }
+    
+    return {
+      createdAt: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    };
+  }
+  
+  // Priority 2: Specific day
+  if (date) {
+    const dayDate = parseDate(date, false);
+    const startDate = new Date(dayDate);
+    const endDate = new Date(dayDate);
+    endDate.setHours(23, 59, 59, 999);
+    
+    return {
+      createdAt: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    };
+  }
+  
+  // Priority 3: Specific month
+  if (year && month) {
+    const yearNum = parseInt(year, 10);
+    const monthNum = parseInt(month, 10) - 1; // JS months are 0-indexed
+    
+    if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
+      throw new Error(`Invalid year: ${year}. Must be between 2000-2100.`);
+    }
+    
+    if (isNaN(monthNum) || monthNum < 0 || monthNum > 11) {
+      throw new Error(`Invalid month: ${month}. Must be between 01-12.`);
+    }
+    
+    const startDate = new Date(yearNum, monthNum, 1);
+    const endDate = new Date(yearNum, monthNum + 1, 0); // Last day of month
+    endDate.setHours(23, 59, 59, 999);
+    
+    return {
+      createdAt: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    };
+  }
+  
+  // Priority 4: Full year
+  if (year) {
+    const yearNum = parseInt(year, 10);
+    
+    if (isNaN(yearNum) || yearNum < 2000 || yearNum > 2100) {
+      throw new Error(`Invalid year: ${year}. Must be between 2000-2100.`);
+    }
+    
+    const startDate = new Date(yearNum, 0, 1); // Jan 1
+    const endDate = new Date(yearNum, 11, 31); // Dec 31
+    endDate.setHours(23, 59, 59, 999);
+    
+    return {
+      createdAt: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    };
+  }
+  
+  // Priority 5: Default to today
+  const today = new Date();
+  const startDate = new Date(today);
+  startDate.setHours(0, 0, 0, 0);
+  const endDate = new Date(today);
+  endDate.setHours(23, 59, 59, 999);
+  
+  return {
+    createdAt: {
+      $gte: startDate,
+      $lte: endDate
+    }
+  };
+}
+
+/**
+ * Get human-readable timeframe description
+ */
+function getTimeframeDescription(query) {
+  const { from, to, date, year, month } = query;
+  
+  if (from || to) {
+    return `Custom range: ${from || 'Beginning'} to ${to || 'Now'}`;
+  }
+  if (date) {
+    return `Day: ${date}`;
+  }
+  if (year && month) {
+    return `Month: ${year}-${String(month).padStart(2, '0')}`;
+  }
+  if (year) {
+    return `Year: ${year}`;
+  }
+  return 'Today (default)';
+}
+
+// ==================== MAIN SALES ENDPOINT (TIME FRAME PAGINATION) ====================
+
+/** 
+ * GET /api/sales
+ * Timeframe-based pagination (no numeric pagination)
+ * Priority: custom range > specific day > month > year > today (default)
+ */
+router.get("/", authMiddleware, async (req, res) => {
+  try {
+    const { 
+      customerPhone, 
+      status,
+      type
+    } = req.query;
+    
+    // Build the main filter object
+    const filter = {};
+    
+    // 1. Apply timeframe filter (priority order handled in buildTimeframeFilter)
+    try {
+      const timeframeFilter = buildTimeframeFilter(req.query);
+      Object.assign(filter, timeframeFilter);
+    } catch (timeframeError) {
+      return res.status(400).json({ 
+        error: timeframeError.message,
+        suggestion: "Use valid date formats: YYYY-MM-DD for dates, YYYY for year, MM for month (01-12)"
+      });
+    }
+    
+    // 2. Apply customer phone filter if provided
+    if (customerPhone) {
+      filter["customer.phone"] = customerPhone;
+    }
+    
+    // 3. Apply status filter if provided, otherwise use default
+    if (status) {
+      filter.status = status;
+    } else {
+      // Default: include completed, pending, and expense statuses
+      filter.status = { $in: ["completed", "pending", "expense"] };
+    }
+    
+    // 4. Apply type filter if provided, otherwise use default
+    if (type) {
+      filter.type = type;
+    } else {
+      // Default: include all types
+      filter.type = { $in: ["sale", "reservation", "expense"] };
+    }
+    
+    // Execute query - get ALL records within timeframe (no skip/limit)
+    const sales = await Sale.find(filter)
+      .select('-__v') // Exclude version key
+      .sort({ createdAt: -1 }) // Newest first as requested
+      .lean();
+    
+    // Get count for metadata
+    const total = sales.length;
+    
+    // Generate timeframe metadata
+    const timeframeDescription = getTimeframeDescription(req.query);
+    const timeframeFilter = buildTimeframeFilter(req.query);
+    
+    // Calculate totals for quick insights
+    const totals = sales.reduce((acc, sale) => {
+      if (sale.type === "expense") {
+        acc.totalExpenses += sale.total;
+        acc.expenseCount += 1;
+      } else {
+        acc.totalRevenue += sale.total;
+        acc.saleCount += 1;
+      }
+      return acc;
+    }, {
+      totalRevenue: 0,
+      totalExpenses: 0,
+      saleCount: 0,
+      expenseCount: 0
+    });
+    
+    // Prepare response with timeframe metadata
+    const response = {
+      success: true,
+      data: sales,
+      timeframe: {
+        description: timeframeDescription,
+        start: timeframeFilter.createdAt.$gte.toISOString(),
+        end: timeframeFilter.createdAt.$lte.toISOString(),
+        query: {
+          from: req.query.from || null,
+          to: req.query.to || null,
+          date: req.query.date || null,
+          year: req.query.year || null,
+          month: req.query.month || null
+        }
+      },
+      summary: {
+        totalRecords: total,
+        revenue: totals.totalRevenue,
+        expenses: totals.totalExpenses,
+        net: totals.totalRevenue - totals.totalExpenses,
+        salesCount: totals.saleCount,
+        expensesCount: totals.expenseCount
+      },
+      filtersApplied: {
+        customerPhone: customerPhone || 'none',
+        status: status || 'default (completed, pending, expense)',
+        type: type || 'default (sale, reservation, expense)'
+      },
+      // Performance warning for large datasets
+      performanceNote: total > 1000 
+        ? `Large dataset (${total} records). Consider using a more specific timeframe.`
+        : null
+    };
+    
+    res.json(response);
+    
+  } catch (error) {
+    console.error("Error fetching sales with timeframe pagination:", error);
+    
+    // Handle specific error types
+    if (error.message.includes("Invalid date format") || 
+        error.message.includes("Invalid year") || 
+        error.message.includes("Invalid month")) {
+      return res.status(400).json({ 
+        error: error.message,
+        validFormats: {
+          date: "YYYY-MM-DD (e.g., 2024-12-25)",
+          month: "year=YYYY&month=MM (e.g., year=2024&month=12)",
+          year: "year=YYYY (e.g., year=2024)",
+          customRange: "from=YYYY-MM-DD&to=YYYY-MM-DD"
+        }
+      });
+    }
+    
+    res.status(500).json({ 
+      error: "Failed to fetch sales",
+      suggestion: "Check your query parameters and try again"
+    });
+  }
+});
+
+// ==================== ALL OTHER ROUTES REMAIN UNCHANGED ====================
+
 /** ---------- DAILY STATS FIRST (before :id) ---------- **/
 router.get("/stats/daily", authMiddleware, async (req, res) => {
   try {
@@ -151,16 +418,14 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
       },
     ]);
 
-    // Limit sales returned to avoid memory issues
+    // Use timeframe-based query (no limit) for consistency
     const sales = await Sale.find({
       createdAt: { $gte: startOfDay, $lte: endOfDay },
-      // ✅ FIXED: SAME FILTER FOR CONSISTENCY
       status: { $in: ["completed", "pending"] },
       type: { $in: ["sale", "reservation"] }
     })
     .sort({ createdAt: -1 })
-    .limit(100) // Limit daily sales returned
-    .select('-__v') // Exclude version key
+    .select('-__v')
     .lean();
 
     res.json({
@@ -355,126 +620,50 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- LIST SALES (WITH PAGINATION AND MEMORY OPTIMIZATION) ---------- **/
-router.get("/", authMiddleware, validateSalesQuery, async (req, res) => {
-  try {
-    const { 
-      page = 1, 
-      limit = 50, // Increased default for better UX
-      customerPhone, 
-      dateFrom, 
-      dateTo,
-      status,
-      type
-    } = req.query;
-    
-    const p = Math.max(1, parseInt(page, 10));
-    const l = Math.min(parseInt(limit, 10), 1000); // Max 1000 per request
-    const filter = {};
+// ==================== MODIFIED ENDPOINTS (REMOVE PAGINATION) ====================
 
-    if (customerPhone) filter["customer.phone"] = customerPhone;
-
-    if (status) {
-      filter.status = status;
-    } else {
-      // ✅ FIXED: INCLUDE PENDING RESERVATIONS (money received) AND COMPLETED SALES
-      filter.status = { $in: ["completed", "pending", "expense"] };
-    }
-
-    // ADD TYPE FILTERING
-    if (type) {
-      filter.type = type;
-    } else {
-      // ✅ FIXED: INCLUDE BOTH SALES AND RESERVATIONS BY DEFAULT
-      filter.type = { $in: ["sale", "reservation", "expense"] };
-    }
-
-    if (dateFrom || dateTo) {
-      filter.createdAt = {};
-      if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
-      if (dateTo) filter.createdAt.$lte = new Date(dateTo);
-    }
-
-    // Use Promise.all for parallel execution
-    const [sales, totalSales] = await Promise.all([
-      Sale.find(filter)
-        .select('-__v') // Exclude version key
-        .skip((p - 1) * l)
-        .limit(l)
-        .sort({ createdAt: -1 })
-        .lean(), // Use lean for better performance
-      Sale.countDocuments(filter)
-    ]);
-
-    // Calculate pagination metadata
-    const totalPages = Math.ceil(totalSales / l);
-    const hasNextPage = p < totalPages;
-    const hasPrevPage = p > 1;
-
-    res.json({
-      success: true,
-      data: sales,
-      pagination: { 
-        currentPage: p, 
-        limit: l,
-        total: totalSales,
-        totalPages,
-        hasNextPage,
-        hasPrevPage,
-        nextPage: hasNextPage ? p + 1 : null,
-        prevPage: hasPrevPage ? p - 1 : null
-      },
-      // Include performance hint for large datasets
-      performanceHint: totalSales > 10000 ? 
-        "Consider adding date filters for better performance" : null
-    });
-  } catch (error) {
-    console.error("Error fetching sales:", error);
-    res.status(500).json({ 
-      error: "Failed to fetch sales",
-      suggestion: "Try adding date filters or reducing limit parameter"
-    });
-  }
-});
-
-/** ---------- GET EXPENSES (WITH PAGINATION) ---------- **/
+/** ---------- GET EXPENSES (TIME FRAME BASED) ---------- **/
 router.get("/expenses/all", authMiddleware, async (req, res) => {
   try {
     const { 
-      page = 1, 
-      limit = 50,
       status 
     } = req.query;
     
-    const p = Math.max(1, parseInt(page, 10));
-    const l = Math.min(parseInt(limit, 10), 500);
+    // Build timeframe filter
+    let timeframeFilter;
+    try {
+      timeframeFilter = buildTimeframeFilter(req.query);
+    } catch (timeframeError) {
+      return res.status(400).json({ 
+        error: timeframeError.message,
+        suggestion: "Use valid date formats: YYYY-MM-DD"
+      });
+    }
     
-    const filter = { type: "expense" };
+    const filter = { 
+      type: "expense",
+      ...timeframeFilter
+    };
     
     if (status) {
       filter.status = status;
     }
 
-    const [expenses, total] = await Promise.all([
-      Sale.find(filter)
-        .select('-__v -items') // Expenses don't have items
-        .skip((p - 1) * l)
-        .limit(l)
-        .sort({ createdAt: -1 })
-        .lean(),
-      Sale.countDocuments(filter)
-    ]);
+    const expenses = await Sale.find(filter)
+      .select('-__v -items') // Expenses don't have items
+      .sort({ createdAt: -1 })
+      .lean();
 
-    const totalPages = Math.ceil(total / l);
+    const total = expenses.length;
+    const totalAmount = expenses.reduce((sum, expense) => sum + expense.total, 0);
 
     res.json({
       success: true,
       data: expenses,
-      pagination: {
-        currentPage: p,
-        limit: l,
-        total,
-        totalPages
+      summary: {
+        totalExpenses: total,
+        totalAmount: totalAmount,
+        timeframe: getTimeframeDescription(req.query)
       }
     });
   } catch (error) {
@@ -483,44 +672,50 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
   }
 });
 
-/** ---------- GET RESERVATIONS (WITH PAGINATION) ---------- **/
+/** ---------- GET RESERVATIONS (TIME FRAME BASED) ---------- **/
 router.get("/reservations/all", authMiddleware, async (req, res) => {
   try {
     const { 
-      page = 1, 
-      limit = 50,
       status 
     } = req.query;
     
-    const p = Math.max(1, parseInt(page, 10));
-    const l = Math.min(parseInt(limit, 10), 500);
+    // Build timeframe filter
+    let timeframeFilter;
+    try {
+      timeframeFilter = buildTimeframeFilter(req.query);
+    } catch (timeframeError) {
+      return res.status(400).json({ 
+        error: timeframeError.message,
+        suggestion: "Use valid date formats: YYYY-MM-DD"
+      });
+    }
     
-    const filter = { type: "reservation" };
+    const filter = { 
+      type: "reservation",
+      ...timeframeFilter
+    };
     
     if (status) {
       filter.status = status;
     }
 
-    const [reservations, total] = await Promise.all([
-      Sale.find(filter)
-        .select('-__v') // Exclude version key
-        .skip((p - 1) * l)
-        .limit(l)
-        .sort({ createdAt: -1 })
-        .lean(),
-      Sale.countDocuments(filter)
-    ]);
+    const reservations = await Sale.find(filter)
+      .select('-__v') // Exclude version key
+      .sort({ createdAt: -1 })
+      .lean();
 
-    const totalPages = Math.ceil(total / l);
+    const total = reservations.length;
+    const pendingCount = reservations.filter(r => r.status === "pending").length;
+    const completedCount = reservations.filter(r => r.status === "completed").length;
 
     res.json({
       success: true,
       data: reservations,
-      pagination: {
-        currentPage: p,
-        limit: l,
-        total,
-        totalPages
+      summary: {
+        totalReservations: total,
+        pending: pendingCount,
+        completed: completedCount,
+        timeframe: getTimeframeDescription(req.query)
       }
     });
   } catch (error) {
@@ -528,6 +723,8 @@ router.get("/reservations/all", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Failed to fetch reservations" });
   }
 });
+
+// ==================== ALL OTHER ROUTES REMAIN EXACTLY THE SAME ====================
 
 /** ---------- GET BY ID (after other specific routes) ---------- **/
 router.get("/:id", authMiddleware, async (req, res) => {
