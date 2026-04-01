@@ -4,6 +4,7 @@ escpos.USB = require('escpos-usb');
 const router = express.Router();
 
 // Find and use the first available USB printer
+//printer
 function getPrinter() {
   try {
     const device = new escpos.USB();
