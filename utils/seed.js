@@ -3,7 +3,7 @@ require("dotenv").config();
 
 // NOTE: ensure your model export matches this path & name:
 // module.exports = mongoose.model("Product", productSchema);
-const Product = require("../models/product");
+const Product = require("../models/Product");
 
 // --- DB Connect ---
 const MONGO_URI =
