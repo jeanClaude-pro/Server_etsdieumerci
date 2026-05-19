@@ -20,6 +20,10 @@ async function authMiddleware(req, res, next) {
       return res.status(401).json({ message: "User not found" });
     }
 
+    if (!user.isActive) {
+      return res.status(403).json({ message: "Votre compte a été désactivé. Contactez un administrateur." });
+    }
+
     req.user = user;
     
     // ✅ ADD THESE PERMISSION FLAGS

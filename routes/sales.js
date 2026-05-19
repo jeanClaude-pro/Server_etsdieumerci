@@ -870,11 +870,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
           total: expenseAmount,
           paymentMethod: normalizedPM,
           notes: notes || originalSale.notes,
-          editedBy: req.user.userId,
+          editedBy: req.user.username,
           editedAt: new Date(),
           $push: {
             editHistory: {
-              editedBy: req.user.userId,
+              editedBy: req.user.username,
               editedAt: new Date(),
               changes: Object.fromEntries(changes),
               reason: reason || "Expense correction"
@@ -1015,11 +1015,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
         reservationDate: reservationDate || originalSale.reservationDate,
         reservationTime: reservationTime || originalSale.reservationTime,
         notes: notes || originalSale.notes,
-        editedBy: req.user.userId,
+        editedBy: req.user.username,
         editedAt: new Date(),
         $push: {
           editHistory: {
-            editedBy: req.user.userId,
+            editedBy: req.user.username,
             editedAt: new Date(),
             changes: Object.fromEntries(changes),
             reason: reason || "Sale correction"
@@ -1159,7 +1159,7 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
         voidedAt: new Date(),
         $push: {
           editHistory: {
-            editedBy: req.user.userId,
+            editedBy: req.user.username,
             editedAt: new Date(),
             changes: { status: { from: sale.status, to: "voided" } },
             reason: reason || "Sale voided"
