@@ -153,8 +153,7 @@ const saleSchema = new mongoose.Schema({
     default: null
   },
   editedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
+    type: String,
     default: null
   },
   editedAt: {
@@ -163,8 +162,7 @@ const saleSchema = new mongoose.Schema({
   },
   editHistory: [{
     editedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User"
+      type: String,
     },
     editedAt: {
       type: Date,

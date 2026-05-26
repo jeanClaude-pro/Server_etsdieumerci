@@ -11,8 +11,14 @@ const printRoutes = require('./routes/print');
 app.use(express.json());
 app.use(morgan("combined"));
 
-// ✅ Allow both local dev + Netlify frontend
-app.use(cors());
+// Allow all origins with explicit headers so Authorization is never stripped
+app.use(cors({
+  origin: true,
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type", "Accept", "X-Requested-With"],
+  credentials: false,
+  optionsSuccessStatus: 200,
+}));
 
 // Env variables
 const PORT = process.env.PORT || 5000;
