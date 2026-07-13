@@ -53,6 +53,25 @@ async function updateCustomerData(customerData, saleTotal) {
   }
 }
 
+// Helper function to attach a sale to a customer record without touching
+// stats (recalculateCustomerStats recomputes totals afterwards). Used when a
+// sale that had no customer on file (e.g. a walk-in) is later linked to one.
+async function findOrCreateCustomerId(customerData) {
+  const { name, phone, email } = customerData;
+  let customer = await Customer.findOne({ phone });
+  if (!customer) {
+    customer = new Customer({
+      name,
+      phone,
+      email: email || "",
+      totalPurchases: 0,
+      totalSpent: 0,
+    });
+    await customer.save();
+  }
+  return customer._id;
+}
+
 // Helper function to recalculate customer statistics (FIXED)
 async function recalculateCustomerStats(customerId) {
   try {
@@ -444,15 +463,16 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
 /** ---------- CREATE SALE OR EXPENSE ---------- **/
 router.post("/", authMiddleware, async (req, res) => {
   try {
-    const { 
-      customer, 
-      items, 
-      paymentMethod, 
-      salesPerson, 
-      type, 
-      reservationDate, 
-      reservationTime, 
+    const {
+      customer,
+      items,
+      paymentMethod,
+      salesPerson,
+      type,
+      reservationDate,
+      reservationTime,
       notes,
+      isWalkIn,
       // 🔹 NEW EXPENSE FIELDS
       reason,
       recipientName,
@@ -513,7 +533,15 @@ router.post("/", authMiddleware, async (req, res) => {
     }
 
     // 🔹 HANDLE REGULAR SALE (existing logic)
-    if (!customer || !customer.name || !customer.phone) {
+    const walkIn = Boolean(isWalkIn);
+
+    if (walkIn && type === "reservation") {
+      return res.status(400).json({
+        error: "Une réservation nécessite les coordonnées du client",
+      });
+    }
+
+    if (!walkIn && (!customer || !customer.name || !customer.phone)) {
       return res
         .status(400)
         .json({ error: "Customer name and phone are required" });
@@ -568,19 +596,24 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const saleNumber = `SN-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-    // FIX: Get customer ID from updateCustomerData and set customerId
-    const customerId = await updateCustomerData(customer, total);
+    // Walk-in sales skip customer identification entirely: no Customer record
+    // is created/updated and no loyalty stats are tracked for these sales.
+    const customerId = walkIn ? null : await updateCustomerData(customer, total);
+    const customerData = walkIn
+      ? { name: "Client de passage", phone: "", email: "" }
+      : {
+          name: customer.name,
+          phone: customer.phone,
+          email: customer.email || "",
+        };
 
     // UPDATED: Include type and reservation fields WITH CORRECT STATUS
     const saleData = {
       saleId,
       saleNumber,
-      customer: {
-        name: customer.name,
-        phone: customer.phone,
-        email: customer.email || "",
-      },
+      customer: customerData,
       customerId: customerId,
+      isWalkIn: walkIn,
       items: enrichedItems,
       subtotal,
       total,
@@ -779,15 +812,16 @@ router.get("/:id", authMiddleware, async (req, res) => {
 router.put("/:id", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
-      customer, 
-      items, 
-      paymentMethod, 
-      reason, 
-      type, 
-      reservationDate, 
-      reservationTime, 
+    const {
+      customer,
+      items,
+      paymentMethod,
+      reason,
+      type,
+      reservationDate,
+      reservationTime,
       notes,
+      isWalkIn,
       // Expense fields
       recipientName,
       recipientPhone,
@@ -891,6 +925,35 @@ router.put("/:id", authMiddleware, async (req, res) => {
     // Track changes for audit
     const changes = new Map();
 
+    // Walk-in status: use the value sent by the client, falling back to the
+    // sale's existing flag when the client doesn't include it in the payload.
+    const walkIn = typeof isWalkIn === "boolean" ? isWalkIn : Boolean(originalSale.isWalkIn);
+    const effectiveType = type || originalSale.type;
+
+    if (walkIn && effectiveType === "reservation") {
+      return res.status(400).json({
+        error: "Une réservation nécessite les coordonnées du client",
+      });
+    }
+
+    if (!walkIn && (!customer || !customer.name || !customer.phone)) {
+      return res
+        .status(400)
+        .json({ error: "Customer name and phone are required" });
+    }
+
+    const customerData = walkIn
+      ? { name: "Client de passage", phone: "", email: "" }
+      : { name: customer.name, phone: customer.phone, email: customer.email || "" };
+
+    // Resolve which customer record (if any) this sale should be linked to:
+    // - walk-in sales are never linked to a customer record
+    // - a sale that already had a customer keeps that link
+    // - a walk-in being converted to an identified sale gets linked here
+    let newCustomerId = walkIn
+      ? null
+      : originalSale.customerId || (await findOrCreateCustomerId(customerData));
+
     // Validate and process items
     let subtotal = 0;
     const enrichedItems = [];
@@ -985,10 +1048,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     // Track what changed
-    if (JSON.stringify(originalSale.customer) !== JSON.stringify(customer)) {
-      changes.set('customer', { from: originalSale.customer, to: customer });
+    if (JSON.stringify(originalSale.customer) !== JSON.stringify(customerData)) {
+      changes.set('customer', { from: originalSale.customer, to: customerData });
     }
-    
+
     if (originalSale.total !== total) {
       changes.set('total', { from: originalSale.total, to: total });
     }
@@ -1006,12 +1069,14 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const updatedSale = await Sale.findByIdAndUpdate(
       id,
       {
-        customer,
+        customer: customerData,
+        customerId: newCustomerId,
+        isWalkIn: walkIn,
         items: enrichedItems,
         subtotal,
         total,
         paymentMethod: normalizedPM,
-        type: type || originalSale.type,
+        type: effectiveType,
         reservationDate: reservationDate || originalSale.reservationDate,
         reservationTime: reservationTime || originalSale.reservationTime,
         notes: notes || originalSale.notes,
@@ -1029,9 +1094,23 @@ router.put("/:id", authMiddleware, async (req, res) => {
       { new: true, runValidators: true }
     );
 
-    // FIX: Use recalculateCustomerStats instead of updateCustomerData
-    if (changes.has('customer') || changes.has('total')) {
-      await recalculateCustomerStats(originalSale.customerId);
+    // FIX: Use recalculateCustomerStats instead of updateCustomerData.
+    // Recalculate both the old and new linked customer (when they differ) so
+    // stats stay accurate whether a sale is re-linked, unlinked (walk-in), or
+    // simply has its customer/total edited.
+    const oldCustomerId = originalSale.customerId
+      ? originalSale.customerId.toString()
+      : null;
+    const newCustomerIdStr = newCustomerId ? newCustomerId.toString() : null;
+
+    if (oldCustomerId && oldCustomerId !== newCustomerIdStr) {
+      await recalculateCustomerStats(oldCustomerId);
+    }
+    if (
+      newCustomerIdStr &&
+      (changes.has("customer") || changes.has("total") || oldCustomerId !== newCustomerIdStr)
+    ) {
+      await recalculateCustomerStats(newCustomerIdStr);
     }
 
     res.json(updatedSale);

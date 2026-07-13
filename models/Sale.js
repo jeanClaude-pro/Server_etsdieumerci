@@ -56,6 +56,11 @@ const saleSchema = new mongoose.Schema({
     ref: 'Customer',
     required: false
   },
+  // Walk-in customer: sale made without collecting customer details
+  isWalkIn: {
+    type: Boolean,
+    default: false
+  },
   items: [saleItemSchema],
   subtotal: {
     type: Number,

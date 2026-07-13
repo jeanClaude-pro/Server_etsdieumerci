@@ -56,9 +56,12 @@ router.post('/receipt', async (req, res) => {
           .style('b')
           .text('CLIENT')
           .style('normal')
-          .text(`Nom: ${receiptData.customerName}`)
-          .text(`Tél: ${receiptData.customerPhone}`);
-        
+          .text(`Nom: ${receiptData.customerName}`);
+
+        if (receiptData.customerPhone) {
+          printer.text(`Tél: ${receiptData.customerPhone}`);
+        }
+
         if (receiptData.customerEmail) {
           printer.text(`Email: ${receiptData.customerEmail}`);
         }
@@ -164,10 +167,11 @@ router.post('/stub', async (req, res) => {
           .feed(1);
 
         // Customer information
-        printer
-          .text(`Client: ${receiptData.customerName}`)
-          .text(`Tél: ${receiptData.customerPhone}`)
-          .feed(1);
+        printer.text(`Client: ${receiptData.customerName}`);
+        if (receiptData.customerPhone) {
+          printer.text(`Tél: ${receiptData.customerPhone}`);
+        }
+        printer.feed(1);
 
         // Items summary
         printer
