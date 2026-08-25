@@ -6,6 +6,10 @@ const Sale = require("../models/Sale");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
 const authMiddleware = require("../middleware/auth");
+const {
+  normalizeExchangeRate,
+  normalizeSaleItemPricing,
+} = require("../utils/salePricing");
 
 // normalize to the Sale model enum
 function normalizePaymentMethod(pm) {
@@ -473,6 +477,7 @@ router.post("/", authMiddleware, async (req, res) => {
       reservationTime,
       notes,
       isWalkIn,
+      exchangeRate,
       // 🔹 NEW EXPENSE FIELDS
       reason,
       recipientName,
@@ -534,6 +539,12 @@ router.post("/", authMiddleware, async (req, res) => {
 
     // 🔹 HANDLE REGULAR SALE (existing logic)
     const walkIn = Boolean(isWalkIn);
+    let transactionExchangeRate;
+    try {
+      transactionExchangeRate = normalizeExchangeRate(exchangeRate);
+    } catch (pricingError) {
+      return res.status(400).json({ error: pricingError.message });
+    }
 
     if (walkIn && type === "reservation") {
       return res.status(400).json({
@@ -576,14 +587,21 @@ router.post("/", authMiddleware, async (req, res) => {
         });
       }
 
-      const lineTotal = Number(price) * Number(quantity);
+      let pricing;
+      try {
+        pricing = normalizeSaleItemPricing(item, transactionExchangeRate);
+      } catch (pricingError) {
+        return res.status(400).json({ error: pricingError.message });
+      }
+
+      const lineTotal = pricing.price * Number(quantity);
       subtotal += lineTotal;
 
       enrichedItems.push({
         productId: new mongoose.Types.ObjectId(productId),
         name: name || product.name,
         quantity: Number(quantity),
-        price: Number(price),
+        ...pricing,
         total: lineTotal,
       });
     }
@@ -617,6 +635,7 @@ router.post("/", authMiddleware, async (req, res) => {
       items: enrichedItems,
       subtotal,
       total,
+      exchangeRate: transactionExchangeRate,
       paymentMethod: normalizedPM,
       status: type === "reservation" ? "pending" : "completed", // ✅ FIXED: Reservations as pending (money received)
       salesPerson: salesPerson || "Admin",
@@ -822,6 +841,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
       reservationTime,
       notes,
       isWalkIn,
+      exchangeRate,
       // Expense fields
       recipientName,
       recipientPhone,
@@ -929,6 +949,14 @@ router.put("/:id", authMiddleware, async (req, res) => {
     // sale's existing flag when the client doesn't include it in the payload.
     const walkIn = typeof isWalkIn === "boolean" ? isWalkIn : Boolean(originalSale.isWalkIn);
     const effectiveType = type || originalSale.type;
+    let transactionExchangeRate;
+    try {
+      transactionExchangeRate = normalizeExchangeRate(
+        exchangeRate ?? originalSale.exchangeRate
+      );
+    } catch (pricingError) {
+      return res.status(400).json({ error: pricingError.message });
+    }
 
     if (walkIn && effectiveType === "reservation") {
       return res.status(400).json({
@@ -971,14 +999,21 @@ router.put("/:id", authMiddleware, async (req, res) => {
         return res.status(400).json({ error: `Product not found: ${productId}` });
       }
 
-      const lineTotal = Number(price) * Number(quantity);
+      let pricing;
+      try {
+        pricing = normalizeSaleItemPricing(item, transactionExchangeRate);
+      } catch (pricingError) {
+        return res.status(400).json({ error: pricingError.message });
+      }
+
+      const lineTotal = pricing.price * Number(quantity);
       subtotal += lineTotal;
 
       enrichedItems.push({
         productId: new mongoose.Types.ObjectId(productId),
         name: name || product.name,
         quantity: Number(quantity),
-        price: Number(price),
+        ...pricing,
         total: lineTotal,
       });
     }
@@ -1075,6 +1110,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
         items: enrichedItems,
         subtotal,
         total,
+        exchangeRate: transactionExchangeRate,
         paymentMethod: normalizedPM,
         type: effectiveType,
         reservationDate: reservationDate || originalSale.reservationDate,

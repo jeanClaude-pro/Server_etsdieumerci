@@ -20,6 +20,31 @@ const saleItemSchema = new mongoose.Schema({
     required: false, // Made optional for expenses
     min: 0
   },
+  enteredPrice: {
+    type: Number,
+    required: false,
+    min: 0
+  },
+  enteredCurrency: {
+    type: String,
+    enum: ["USD", "FC"],
+    required: false
+  },
+  priceUSD: {
+    type: Number,
+    required: false,
+    min: 0
+  },
+  priceFC: {
+    type: Number,
+    required: false,
+    min: 0
+  },
+  exchangeRate: {
+    type: Number,
+    required: false,
+    min: 0
+  },
   total: {
     type: Number,
     required: false, // Made optional for expenses
@@ -70,6 +95,12 @@ const saleSchema = new mongoose.Schema({
   total: {
     type: Number,
     required: true,
+    min: 0
+  },
+  // Snapshot used for this transaction; historical sales never use today's rate.
+  exchangeRate: {
+    type: Number,
+    required: false,
     min: 0
   },
   paymentMethod: {
