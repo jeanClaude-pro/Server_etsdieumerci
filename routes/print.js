@@ -2,6 +2,9 @@ const express = require('express');
 const escpos = require('escpos');
 escpos.USB = require('escpos-usb');
 const router = express.Router();
+const authMiddleware = require('../middleware/auth');
+
+router.use(authMiddleware);
 
 // Find and use the first available USB printer
 //printer
@@ -75,11 +78,22 @@ router.post('/receipt', async (req, res) => {
           .style('normal');
 
         receiptData.items.forEach((item) => {
-          printer
-            .text(`${item.quantity}x ${item.name}`)
-            .align('rt')
-            .text(`$${item.total.toFixed(2)}`)
-            .align('lt');
+          const quantity = Number(item.quantity);
+          const usdUnitPrice = Number(item.priceUSD ?? item.unitPrice);
+          if (item.enteredCurrency === 'FC' && Number.isFinite(Number(item.enteredPrice))) {
+            const exactFcUnitPrice = Number(item.enteredPrice);
+            printer
+              .text(`${quantity}x ${item.name}`)
+              .text(`PU: ${exactFcUnitPrice.toLocaleString('fr-FR')} FC`)
+              .text(`PT: ${(exactFcUnitPrice * quantity).toLocaleString('fr-FR')} FC`)
+              .text(`Eq. USD: $${(usdUnitPrice * quantity).toFixed(2)}`);
+          } else {
+            printer
+              .text(`${quantity}x ${item.name}`)
+              .align('rt')
+              .text(`$${(usdUnitPrice * quantity).toFixed(2)}`)
+              .align('lt');
+          }
         });
 
         // Total
@@ -180,7 +194,13 @@ router.post('/stub', async (req, res) => {
           .style('normal');
 
         receiptData.items.forEach((item) => {
-          printer.text(`${item.quantity}x ${item.name}`);
+          const quantity = Number(item.quantity);
+          printer.text(`${quantity}x ${item.name}`);
+          if (item.enteredCurrency === 'FC' && Number.isFinite(Number(item.enteredPrice))) {
+            printer.text(
+              `${(Number(item.enteredPrice) * quantity).toLocaleString('fr-FR')} FC`
+            );
+          }
         });
 
         // Total

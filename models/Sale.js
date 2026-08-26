@@ -219,8 +219,10 @@ saleSchema.index({ createdAt: -1 });
 saleSchema.index({ "customer.phone": 1 }); // Keep this explicit index
 // REMOVED: saleSchema.index({ saleId: 1 }); ← DUPLICATE of unique: true on line 27
 saleSchema.index({ salesPerson: 1 });
-saleSchema.index({ type: 1 }); // Add index for type (sale/reservation/expense)
 saleSchema.index({ status: 1 });
+saleSchema.index({ type: 1, status: 1, createdAt: -1 });
+saleSchema.index({ paymentMethod: 1, createdAt: -1 });
+saleSchema.index({ customerId: 1, createdAt: -1 });
 
 // Pre-save middleware to calculate item totals (only for sales with items)
 saleSchema.pre("save", function(next) {

@@ -12,6 +12,11 @@ const entrySchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  enteredAmount: { type: Number, min: 0 },
+  enteredCurrency: { type: String, enum: ["USD", "FC"], default: "USD" },
+  amountUSD: { type: Number, min: 0 },
+  amountFC: { type: Number, min: 0 },
+  exchangeRate: { type: Number, min: 0 },
   source: {
     type: String,
     required: true,
@@ -102,9 +107,10 @@ const entrySchema = new mongoose.Schema({
 // Indexes for performance (like your Sale model)
 // NOTE: Removed duplicate index for entryId (already created by unique: true)
 entrySchema.index({ createdAt: -1 });
-entrySchema.index({ status: 1 });
-entrySchema.index({ category: 1 });
 entrySchema.index({ "receivedFrom.phone": 1 });
 entrySchema.index({ source: 1 });
+entrySchema.index({ status: 1, createdAt: -1 });
+entrySchema.index({ paymentMethod: 1, createdAt: -1 });
+entrySchema.index({ category: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Entry", entrySchema);

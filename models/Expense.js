@@ -26,6 +26,11 @@ const expenseSchema = new mongoose.Schema({
     required: true,
     min: 0
   },
+  enteredAmount: { type: Number, min: 0 },
+  enteredCurrency: { type: String, enum: ["USD", "FC"], default: "USD" },
+  amountUSD: { type: Number, min: 0 },
+  amountFC: { type: Number, min: 0 },
+  exchangeRate: { type: Number, min: 0 },
   paymentMethod: {
     type: String,
     enum: ["cash", "mpesa", "bank", "card", "other"],
@@ -60,7 +65,8 @@ const expenseSchema = new mongoose.Schema({
 // Create index for better query performance
 // NOTE: Removed duplicate index for expenseId (already created by unique: true)
 expenseSchema.index({ createdAt: -1 });
-expenseSchema.index({ status: 1 });
 expenseSchema.index({ recordedBy: 1 });
+expenseSchema.index({ status: 1, createdAt: -1 });
+expenseSchema.index({ paymentMethod: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Expense", expenseSchema);

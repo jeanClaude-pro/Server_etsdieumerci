@@ -62,6 +62,7 @@ router.post("/", authMiddleware, isAdmin, async (req, res) => {
       description,
       category,
       brand,
+      price,
       stock,
       minStock,
       unit,
@@ -81,6 +82,7 @@ router.post("/", authMiddleware, isAdmin, async (req, res) => {
       description: description || "",
       category,
       brand: brand || "",
+      price: Number(price) || 0,
       stock: Number(stock) || 0,
       minStock: Number(minStock) || 0,
       unit: unit || "pcs",
@@ -110,6 +112,7 @@ router.put("/:id", authMiddleware, isAdmin, async (req, res) => {
       description,
       category,
       brand,
+      price,
       stock,
       minStock,
       unit,
@@ -124,6 +127,7 @@ router.put("/:id", authMiddleware, isAdmin, async (req, res) => {
     if (description !== undefined) updateData.description = description;
     if (category !== undefined) updateData.category = category;
     if (brand !== undefined) updateData.brand = brand;
+    if (price !== undefined) updateData.price = Number(price);
     if (stock !== undefined) updateData.stock = Number(stock);
     if (minStock !== undefined) updateData.minStock = Number(minStock);
     if (unit !== undefined) updateData.unit = unit;

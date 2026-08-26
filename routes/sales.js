@@ -10,6 +10,12 @@ const {
   normalizeExchangeRate,
   normalizeSaleItemPricing,
 } = require("../utils/salePricing");
+const {
+  buildTimeframeFilter: buildBusinessTimeframeFilter,
+  paginationMetadata,
+  parsePagination,
+} = require("../utils/queryHelpers");
+const { buildStockAdjustments } = require("../utils/stockCalculations");
 
 // normalize to the Sale model enum
 function normalizePaymentMethod(pm) {
@@ -25,44 +31,27 @@ function normalizePaymentMethod(pm) {
 }
 
 // Helper function to update customer data (FIXED)
-async function updateCustomerData(customerData, saleTotal) {
+async function updateCustomerData(customerData, saleTotal, session = null) {
   const { name, phone, email } = customerData;
   const now = new Date();
-  try {
-    let customer = await Customer.findOne({ phone });
-    if (customer) {
-      customer.totalPurchases += 1;
-      customer.totalSpent += parseFloat(saleTotal);
-      customer.lastPurchaseDate = now;
-      if (name && customer.name !== name) customer.name = name;
-      if (email && customer.email !== email) customer.email = email;
-    } else {
-      customer = new Customer({
-        name,
-        phone,
-        email: email || "",
-        totalPurchases: 1,
-        totalSpent: parseFloat(saleTotal),
-        firstPurchaseDate: now,
-        lastPurchaseDate: now,
-      });
-    }
-    await customer.save();
-    
-    // RETURN THE CUSTOMER ID
-    return customer._id;
-  } catch (error) {
-    console.error("Error updating customer data:", error);
-    return null;
-  }
+  const customer = await Customer.findOneAndUpdate(
+    { phone },
+    {
+      $set: { name, email: email || "", lastPurchaseDate: now },
+      $setOnInsert: { firstPurchaseDate: now },
+      $inc: { totalPurchases: 1, totalSpent: Number(saleTotal) },
+    },
+    { new: true, upsert: true, runValidators: true, session }
+  );
+  return customer._id;
 }
 
 // Helper function to attach a sale to a customer record without touching
 // stats (recalculateCustomerStats recomputes totals afterwards). Used when a
 // sale that had no customer on file (e.g. a walk-in) is later linked to one.
-async function findOrCreateCustomerId(customerData) {
+async function findOrCreateCustomerId(customerData, session = null) {
   const { name, phone, email } = customerData;
-  let customer = await Customer.findOne({ phone });
+  let customer = await Customer.findOne({ phone }).session(session);
   if (!customer) {
     customer = new Customer({
       name,
@@ -71,21 +60,27 @@ async function findOrCreateCustomerId(customerData) {
       totalPurchases: 0,
       totalSpent: 0,
     });
-    await customer.save();
+    await customer.save({ session });
+  } else {
+    customer.name = name;
+    customer.email = email || "";
+    await customer.save({ session });
   }
   return customer._id;
 }
 
 // Helper function to recalculate customer statistics (FIXED)
-async function recalculateCustomerStats(customerId) {
+async function recalculateCustomerStats(customerId, session = null) {
   try {
     // FIX: Only include completed sales (exclude voided and corrected)
-    const sales = await Sale.find({ 
-      customerId: customerId,
-      status: { $in: ["completed", "pending", undefined, null] } // Only valid sales
+    const sales = await Sale.find({
+      customerId,
+      type: { $in: ["sale", "reservation"] },
+      status: { $in: ["completed", "pending", null] }
     })
     .sort({ createdAt: 1 })
     .select('total status type createdAt') // Only select needed fields
+    .session(session)
     .lean();
     
     // Additional safety filter
@@ -99,7 +94,7 @@ async function recalculateCustomerStats(customerId) {
         totalSpent: 0,
         firstPurchaseDate: null,
         lastPurchaseDate: null,
-      });
+      }, { session });
       return;
     }
     
@@ -113,11 +108,52 @@ async function recalculateCustomerStats(customerId) {
       totalSpent,
       firstPurchaseDate,
       lastPurchaseDate,
-    });
+    }, { session });
   } catch (error) {
     console.error("Error recalculating customer stats:", error);
     throw error;
   }
+}
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function isTransactionUnsupported(error) {
+  return error?.code === 20 ||
+    /transaction numbers are only allowed|replica set member or mongos/i.test(error?.message || "");
+}
+
+async function runTransaction(work) {
+  const session = await mongoose.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      result = await work(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
+
+function sendMutationError(res, error, fallbackMessage) {
+  if (error instanceof HttpError) {
+    return res.status(error.status).json({ error: error.message });
+  }
+  if (isTransactionUnsupported(error)) {
+    return res.status(503).json({
+      error: "Les opérations de vente exigent MongoDB en replica set pour garantir l'intégrité du stock.",
+    });
+  }
+  if (error.name === "ValidationError") {
+    const errors = Object.values(error.errors).map((entry) => entry.message);
+    return res.status(400).json({ error: errors.join(", ") });
+  }
+  return res.status(500).json({ error: fallbackMessage });
 }
 
 // ==================== TIME FRAME HELPER FUNCTIONS ====================
@@ -152,6 +188,8 @@ function parseDate(dateStr, isEndDate = false) {
  * @returns {Object} MongoDB date filter { createdAt: { $gte, $lte } }
  */
 function buildTimeframeFilter(query) {
+  return buildBusinessTimeframeFilter(query);
+  /* legacy implementation retained below for reference during rollout */
   const { from, to, date, year, month } = query;
   
   // Priority 1: Custom date range (from and to)
@@ -279,7 +317,9 @@ router.get("/", authMiddleware, async (req, res) => {
     const { 
       customerPhone, 
       status,
-      type
+      type,
+      paymentMethod,
+      search
     } = req.query;
     
     // Build the main filter object
@@ -300,6 +340,24 @@ router.get("/", authMiddleware, async (req, res) => {
     if (customerPhone) {
       filter["customer.phone"] = customerPhone;
     }
+
+    if (paymentMethod) {
+      const normalizedPayment = normalizePaymentMethod(paymentMethod);
+      filter.paymentMethod = normalizedPayment;
+    }
+
+    if (search) {
+      const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = { $regex: escapedSearch, $options: "i" };
+      filter.$or = [
+        { saleId: searchRegex },
+        { saleNumber: searchRegex },
+        { "customer.name": searchRegex },
+        { "customer.phone": searchRegex },
+        { salesPerson: searchRegex },
+        { "items.name": searchRegex },
+      ];
+    }
     
     // 3. Apply status filter if provided, otherwise use default
     if (status) {
@@ -317,40 +375,66 @@ router.get("/", authMiddleware, async (req, res) => {
       filter.type = { $in: ["sale", "reservation", "expense"] };
     }
     
-    // Execute query - get ALL records within timeframe (no skip/limit)
-    const sales = await Sale.find(filter)
-      .select('-__v') // Exclude version key
-      .sort({ createdAt: -1 }) // Newest first as requested
-      .lean();
-    
-    // Get count for metadata
-    const total = sales.length;
+    const { page, limit, skip } = parsePagination(req.query);
+    const facetResult = await Sale.aggregate([
+      { $match: filter },
+      {
+        $facet: {
+          data: [
+            { $sort: { createdAt: -1, _id: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            { $project: { __v: 0 } },
+          ],
+          metadata: [{ $count: "totalRecords" }],
+          summary: [{
+            $group: {
+              _id: null,
+              totalRevenue: {
+                $sum: { $cond: [{ $ne: ["$type", "expense"] }, "$total", 0] },
+              },
+              totalExpenses: {
+                $sum: { $cond: [{ $eq: ["$type", "expense"] }, "$total", 0] },
+              },
+              saleCount: {
+                $sum: { $cond: [{ $ne: ["$type", "expense"] }, 1, 0] },
+              },
+              expenseCount: {
+                $sum: { $cond: [{ $eq: ["$type", "expense"] }, 1, 0] },
+              },
+              completedCount: {
+                $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] },
+              },
+              pendingCount: {
+                $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
+              },
+            },
+          }],
+        },
+      },
+    ]);
+    const facet = facetResult[0] || { data: [], metadata: [], summary: [] };
+    const sales = facet.data || [];
+    const total = facet.metadata?.[0]?.totalRecords || 0;
     
     // Generate timeframe metadata
     const timeframeDescription = getTimeframeDescription(req.query);
     const timeframeFilter = buildTimeframeFilter(req.query);
     
-    // Calculate totals for quick insights
-    const totals = sales.reduce((acc, sale) => {
-      if (sale.type === "expense") {
-        acc.totalExpenses += sale.total;
-        acc.expenseCount += 1;
-      } else {
-        acc.totalRevenue += sale.total;
-        acc.saleCount += 1;
-      }
-      return acc;
-    }, {
+    const totals = facet.summary?.[0] || {
       totalRevenue: 0,
       totalExpenses: 0,
       saleCount: 0,
-      expenseCount: 0
-    });
+      expenseCount: 0,
+      completedCount: 0,
+      pendingCount: 0,
+    };
     
     // Prepare response with timeframe metadata
     const response = {
       success: true,
       data: sales,
+      pagination: paginationMetadata(page, limit, total),
       timeframe: {
         description: timeframeDescription,
         start: timeframeFilter.createdAt.$gte.toISOString(),
@@ -369,10 +453,14 @@ router.get("/", authMiddleware, async (req, res) => {
         expenses: totals.totalExpenses,
         net: totals.totalRevenue - totals.totalExpenses,
         salesCount: totals.saleCount,
-        expensesCount: totals.expenseCount
+        expensesCount: totals.expenseCount,
+        completedCount: totals.completedCount,
+        pendingCount: totals.pendingCount,
       },
       filtersApplied: {
         customerPhone: customerPhone || 'none',
+        paymentMethod: paymentMethod || 'none',
+        search: search || 'none',
         status: status || 'default (completed, pending, expense)',
         type: type || 'default (sale, reservation, expense)'
       },
@@ -614,9 +702,6 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const saleNumber = `SN-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-    // Walk-in sales skip customer identification entirely: no Customer record
-    // is created/updated and no loyalty stats are tracked for these sales.
-    const customerId = walkIn ? null : await updateCustomerData(customer, total);
     const customerData = walkIn
       ? { name: "Client de passage", phone: "", email: "" }
       : {
@@ -630,7 +715,7 @@ router.post("/", authMiddleware, async (req, res) => {
       saleId,
       saleNumber,
       customer: customerData,
-      customerId: customerId,
+      customerId: null,
       isWalkIn: walkIn,
       items: enrichedItems,
       subtotal,
@@ -645,30 +730,34 @@ router.post("/", authMiddleware, async (req, res) => {
       notes: notes || ""
     };
 
-    for (const it of enrichedItems) {
-      const updated = await Product.findOneAndUpdate(
-        { _id: it.productId, stock: { $gte: it.quantity } },
-        { $inc: { stock: -it.quantity } },
-        { new: true }
-      );
-      if (!updated) {
-        return res.status(409).json({
-          error: "Stock changed for an item. Please refresh and try again.",
-        });
-      }
-    }
+    const savedSale = await runTransaction(async (session) => {
+      // Walk-in sales never create or update a Customer record.
+      saleData.customerId = walkIn
+        ? null
+        : await updateCustomerData(customer, total, session);
 
-    const sale = new Sale(saleData);
-    const savedSale = await sale.save();
+      for (const item of enrichedItems) {
+        const updated = await Product.findOneAndUpdate(
+          { _id: item.productId, stock: { $gte: item.quantity } },
+          { $inc: { stock: -item.quantity } },
+          { new: true, session }
+        );
+        if (!updated) {
+          throw new HttpError(
+            409,
+            `Stock insuffisant pour ${item.name}. Actualisez les produits puis réessayez.`
+          );
+        }
+      }
+
+      const createdSales = await Sale.create([saleData], { session });
+      return createdSales[0];
+    });
 
     return res.status(201).json(savedSale);
   } catch (error) {
     console.error("Error creating sale/expense:", error);
-    if (error.name === "ValidationError") {
-      const errors = Object.values(error.errors).map((e) => e.message);
-      return res.status(400).json({ error: errors.join(", ") });
-    }
-    return res.status(500).json({ error: "Failed to create sale/expense" });
+    return sendMutationError(res, error, "Failed to create sale/expense");
   }
 });
 
@@ -684,7 +773,11 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
     // Build timeframe filter
     let timeframeFilter;
     try {
-      timeframeFilter = buildTimeframeFilter(req.query);
+      timeframeFilter = buildBusinessTimeframeFilter(
+        req.query,
+        "createdAt",
+        false
+      );
     } catch (timeframeError) {
       return res.status(400).json({ 
         error: timeframeError.message,
@@ -701,21 +794,32 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
       filter.status = status;
     }
 
-    const expenses = await Sale.find(filter)
+    const { page, limit, skip } = parsePagination(req.query);
+    const [expenses, total, summaryResult] = await Promise.all([
+      Sale.find(filter)
       .select('-__v -items') // Expenses don't have items
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const total = expenses.length;
-    const totalAmount = expenses.reduce((sum, expense) => sum + expense.total, 0);
+      .sort({ createdAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+      Sale.countDocuments(filter),
+      Sale.aggregate([
+        { $match: filter },
+        { $group: { _id: null, totalAmount: { $sum: "$total" } } },
+      ]),
+    ]);
+    const totalAmount = summaryResult[0]?.totalAmount || 0;
 
     res.json({
       success: true,
       data: expenses,
+      pagination: paginationMetadata(page, limit, total),
       summary: {
         totalExpenses: total,
         totalAmount: totalAmount,
-        timeframe: getTimeframeDescription(req.query)
+        timeframe: Object.keys(timeframeFilter).length
+          ? getTimeframeDescription(req.query)
+          : "All history"
       }
     });
   } catch (error) {
@@ -728,13 +832,19 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
 router.get("/reservations/all", authMiddleware, async (req, res) => {
   try {
     const { 
-      status 
+      status,
+      paymentMethod,
+      search,
     } = req.query;
     
     // Build timeframe filter
     let timeframeFilter;
     try {
-      timeframeFilter = buildTimeframeFilter(req.query);
+      timeframeFilter = buildBusinessTimeframeFilter(
+        req.query,
+        "createdAt",
+        false
+      );
     } catch (timeframeError) {
       return res.status(400).json({ 
         error: timeframeError.message,
@@ -748,26 +858,82 @@ router.get("/reservations/all", authMiddleware, async (req, res) => {
     };
     
     if (status) {
+      if (!["pending", "completed"].includes(status)) {
+        return res.status(400).json({ error: "Invalid reservation status" });
+      }
       filter.status = status;
+    } else {
+      filter.status = { $in: ["pending", "completed"] };
+    }
+    if (paymentMethod) filter.paymentMethod = normalizePaymentMethod(paymentMethod);
+    if (search) {
+      const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = { $regex: escaped, $options: "i" };
+      filter.$or = [
+        { saleId: regex },
+        { "customer.name": regex },
+        { "customer.phone": regex },
+        { "items.name": regex },
+      ];
     }
 
-    const reservations = await Sale.find(filter)
-      .select('-__v') // Exclude version key
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const total = reservations.length;
-    const pendingCount = reservations.filter(r => r.status === "pending").length;
-    const completedCount = reservations.filter(r => r.status === "completed").length;
+    const { page, limit, skip } = parsePagination(req.query);
+    const result = await Sale.aggregate([
+      { $match: filter },
+      {
+        $facet: {
+          data: [
+            { $sort: { createdAt: -1, _id: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            { $project: { __v: 0 } },
+          ],
+          metadata: [{ $count: "totalRecords" }],
+          summary: [{
+            $group: {
+              _id: null,
+              totalReservations: { $sum: 1 },
+              pending: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+              completed: { $sum: { $cond: [{ $eq: ["$status", "completed"] }, 1, 0] } },
+              revenue: { $sum: "$total" },
+              itemQuantity: {
+                $sum: {
+                  $reduce: {
+                    input: "$items",
+                    initialValue: 0,
+                    in: { $add: ["$$value", { $ifNull: ["$$this.quantity", 0] }] },
+                  },
+                },
+              },
+            },
+          }],
+        },
+      },
+    ]);
+    const facet = result[0] || { data: [], metadata: [], summary: [] };
+    const reservations = facet.data || [];
+    const total = facet.metadata?.[0]?.totalRecords || 0;
+    const summary = facet.summary?.[0] || {
+      totalReservations: 0,
+      pending: 0,
+      completed: 0,
+      revenue: 0,
+      itemQuantity: 0,
+    };
 
     res.json({
       success: true,
       data: reservations,
+      pagination: paginationMetadata(page, limit, total),
       summary: {
-        totalReservations: total,
-        pending: pendingCount,
-        completed: completedCount,
-        timeframe: getTimeframeDescription(req.query)
+        totalReservations: summary.totalReservations,
+        pending: summary.pending,
+        completed: summary.completed,
+        revenue: summary.revenue,
+        itemQuantity: summary.itemQuantity,
+        timeframe: Object.keys(timeframeFilter).length
+          ? getTimeframeDescription(req.query)
+          : "All history"
       }
     });
   } catch (error) {
@@ -978,9 +1144,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     // - walk-in sales are never linked to a customer record
     // - a sale that already had a customer keeps that link
     // - a walk-in being converted to an identified sale gets linked here
-    let newCustomerId = walkIn
-      ? null
-      : originalSale.customerId || (await findOrCreateCustomerId(customerData));
+    let newCustomerId = walkIn ? null : originalSale.customerId || null;
 
     // Validate and process items
     let subtotal = 0;
@@ -1020,68 +1184,6 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
     const total = subtotal;
 
-    // Calculate stock adjustments
-    const stockAdjustments = [];
-    
-    for (const newItem of enrichedItems) {
-      const oldItem = originalSale.items.find(item => 
-        item.productId.toString() === newItem.productId.toString()
-      );
-
-      if (oldItem) {
-        // Item exists in both old and new - calculate quantity difference
-        const quantityDiff = newItem.quantity - oldItem.quantity;
-        if (quantityDiff !== 0) {
-          stockAdjustments.push({
-            productId: newItem.productId,
-            adjustment: -quantityDiff // Negative because we're reversing old sale and applying new
-          });
-        }
-      } else {
-        // New item added - need to reduce stock
-        stockAdjustments.push({
-          productId: newItem.productId,
-          adjustment: -newItem.quantity
-        });
-      }
-    }
-
-    // Handle removed items - return stock
-    for (const oldItem of originalSale.items) {
-      const itemStillExists = enrichedItems.find(item => 
-        item.productId.toString() === oldItem.productId.toString()
-      );
-      
-      if (!itemStillExists) {
-        stockAdjustments.push({
-          productId: oldItem.productId,
-          adjustment: oldItem.quantity // Positive because we're returning stock
-        });
-      }
-    }
-
-    // Apply stock adjustments
-    for (const adjustment of stockAdjustments) {
-      const updatedProduct = await Product.findByIdAndUpdate(
-        adjustment.productId,
-        { $inc: { stock: adjustment.adjustment } },
-        { new: true }
-      );
-      
-      if (!updatedProduct || updatedProduct.stock < 0) {
-        // Rollback previous adjustments if any fail
-        for (const rollbackAdj of stockAdjustments) {
-          await Product.findByIdAndUpdate(
-            rollbackAdj.productId,
-            { $inc: { stock: -rollbackAdj.adjustment } }
-          );
-        }
-        return res.status(400).json({ 
-          error: `Insufficient stock for product update` 
-        });
-      }
-    }
-
     // Track what changed
     if (JSON.stringify(originalSale.customer) !== JSON.stringify(customerData)) {
       changes.set('customer', { from: originalSale.customer, to: customerData });
@@ -1096,58 +1198,86 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     // Track type changes
-    if (originalSale.type !== type) {
-      changes.set('type', { from: originalSale.type, to: type });
+    if (originalSale.type !== effectiveType) {
+      changes.set('type', { from: originalSale.type, to: effectiveType });
     }
 
-    // Update the sale
-    const updatedSale = await Sale.findByIdAndUpdate(
-      id,
-      {
-        customer: customerData,
-        customerId: newCustomerId,
-        isWalkIn: walkIn,
-        items: enrichedItems,
-        subtotal,
-        total,
-        exchangeRate: transactionExchangeRate,
-        paymentMethod: normalizedPM,
-        type: effectiveType,
-        reservationDate: reservationDate || originalSale.reservationDate,
-        reservationTime: reservationTime || originalSale.reservationTime,
-        notes: notes || originalSale.notes,
-        editedBy: req.user.username,
-        editedAt: new Date(),
-        $push: {
-          editHistory: {
-            editedBy: req.user.username,
-            editedAt: new Date(),
-            changes: Object.fromEntries(changes),
-            reason: reason || "Sale correction"
-          }
+    const updatedSale = await runTransaction(async (session) => {
+      const currentSale = await Sale.findById(id).session(session).lean();
+      if (!currentSale) throw new HttpError(404, "Sale not found");
+      if (["voided", "corrected"].includes(currentSale.status)) {
+        throw new HttpError(409, "Cannot edit a voided or corrected sale");
+      }
+
+      const customerChanged =
+        !walkIn && currentSale.customer?.phone !== customerData.phone;
+      if (!walkIn && (!newCustomerId || customerChanged)) {
+        newCustomerId = await findOrCreateCustomerId(customerData, session);
+      }
+
+      const stockAdjustments = buildStockAdjustments(
+        currentSale.items,
+        enrichedItems
+      );
+      for (const { productId, adjustment } of stockAdjustments) {
+        const filter = { _id: productId };
+        if (adjustment < 0) filter.stock = { $gte: -adjustment };
+        const updatedProduct = await Product.findOneAndUpdate(
+          filter,
+          { $inc: { stock: adjustment } },
+          { new: true, session }
+        );
+        if (!updatedProduct) {
+          throw new HttpError(
+            409,
+            "Stock insuffisant pour modifier cette vente. Actualisez puis réessayez."
+          );
         }
-      },
-      { new: true, runValidators: true }
-    );
+      }
 
-    // FIX: Use recalculateCustomerStats instead of updateCustomerData.
-    // Recalculate both the old and new linked customer (when they differ) so
-    // stats stay accurate whether a sale is re-linked, unlinked (walk-in), or
-    // simply has its customer/total edited.
-    const oldCustomerId = originalSale.customerId
-      ? originalSale.customerId.toString()
-      : null;
-    const newCustomerIdStr = newCustomerId ? newCustomerId.toString() : null;
+      const savedSale = await Sale.findByIdAndUpdate(
+        id,
+        {
+          customer: customerData,
+          customerId: newCustomerId,
+          isWalkIn: walkIn,
+          items: enrichedItems,
+          subtotal,
+          total,
+          exchangeRate: transactionExchangeRate,
+          paymentMethod: normalizedPM,
+          type: effectiveType,
+          reservationDate: reservationDate || originalSale.reservationDate,
+          reservationTime: reservationTime || originalSale.reservationTime,
+          notes: notes || originalSale.notes,
+          editedBy: req.user.username,
+          editedAt: new Date(),
+          $push: {
+            editHistory: {
+              editedBy: req.user.username,
+              editedAt: new Date(),
+              changes: Object.fromEntries(changes),
+              reason: reason || "Sale correction"
+            }
+          }
+        },
+        { new: true, runValidators: true, session }
+      );
 
-    if (oldCustomerId && oldCustomerId !== newCustomerIdStr) {
-      await recalculateCustomerStats(oldCustomerId);
-    }
-    if (
-      newCustomerIdStr &&
-      (changes.has("customer") || changes.has("total") || oldCustomerId !== newCustomerIdStr)
-    ) {
-      await recalculateCustomerStats(newCustomerIdStr);
-    }
+      const oldCustomerId = currentSale.customerId
+        ? currentSale.customerId.toString()
+        : null;
+      const newCustomerIdString = newCustomerId
+        ? newCustomerId.toString()
+        : null;
+      if (oldCustomerId && oldCustomerId !== newCustomerIdString) {
+        await recalculateCustomerStats(oldCustomerId, session);
+      }
+      if (newCustomerIdString) {
+        await recalculateCustomerStats(newCustomerIdString, session);
+      }
+      return savedSale;
+    });
 
     res.json(updatedSale);
   } catch (error) {
@@ -1155,7 +1285,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     if (error.name === "CastError") {
       return res.status(400).json({ error: "Invalid sale ID" });
     }
-    res.status(500).json({ error: "Failed to edit sale" });
+    return sendMutationError(res, error, "Failed to edit sale");
   }
 });
 
@@ -1180,8 +1310,8 @@ router.patch("/:id/complete", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Reservation already completed" });
     }
 
-    const updatedSale = await Sale.findByIdAndUpdate(
-      id,
+    const updatedSale = await Sale.findOneAndUpdate(
+      { _id: id, type: "reservation", status: "pending" },
       {
         status: "completed",
         completedAt: new Date(),
@@ -1190,6 +1320,9 @@ router.patch("/:id/complete", authMiddleware, async (req, res) => {
       { new: true }
     );
 
+    if (!updatedSale) {
+      return res.status(409).json({ error: "Reservation status changed; refresh and retry" });
+    }
     res.json(updatedSale);
   } catch (error) {
     console.error("Error completing reservation:", error);
@@ -1219,8 +1352,8 @@ router.patch("/:id/pending", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "This is not a reservation" });
     }
 
-    const updatedSale = await Sale.findByIdAndUpdate(
-      id,
+    const updatedSale = await Sale.findOneAndUpdate(
+      { _id: id, type: "reservation", status: "completed" },
       {
         status: "pending",
         completedAt: null,
@@ -1229,6 +1362,9 @@ router.patch("/:id/pending", authMiddleware, async (req, res) => {
       { new: true }
     );
 
+    if (!updatedSale) {
+      return res.status(409).json({ error: "Only a completed reservation can return to pending" });
+    }
     res.json(updatedSale);
   } catch (error) {
     console.error("Error setting reservation to pending:", error);
@@ -1246,27 +1382,32 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
 
-    const sale = await Sale.findById(id).lean();
+    const voidedSale = await runTransaction(async (session) => {
+    const sale = await Sale.findById(id).session(session).lean();
     if (!sale) {
-      return res.status(404).json({ error: "Sale not found" });
+      throw new HttpError(404, "Sale not found");
     }
 
     if (sale.status === "voided") {
-      return res.status(400).json({ error: "Sale is already voided" });
+      throw new HttpError(409, "Sale is already voided");
     }
 
     // Return stock to inventory (only for sales and reservations with items)
     // ✅ FIXED: Check for reservation type as well
     if ((sale.type === "sale" || sale.type === "reservation") && sale.items && sale.items.length > 0) {
       for (const item of sale.items) {
-        await Product.findByIdAndUpdate(
+        const restoredProduct = await Product.findByIdAndUpdate(
           item.productId,
-          { $inc: { stock: item.quantity } }
+          { $inc: { stock: item.quantity } },
+          { session }
         );
+        if (!restoredProduct) {
+          throw new HttpError(409, `Produit introuvable: ${item.name}`);
+        }
       }
     }
 
-    const voidedSale = await Sale.findByIdAndUpdate(
+    const updatedSale = await Sale.findByIdAndUpdate(
       id,
       {
         status: "voided",
@@ -1281,18 +1422,20 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
           }
         }
       },
-      { new: true }
+      { new: true, session }
     );
 
     // FIX: Recalculate customer stats after voiding (only for sales and reservations)
     if (sale.customerId && (sale.type === "sale" || sale.type === "reservation")) {
-      await recalculateCustomerStats(sale.customerId);
+      await recalculateCustomerStats(sale.customerId, session);
     }
+    return updatedSale;
+    });
 
     res.json(voidedSale);
   } catch (error) {
     console.error("Error voiding sale:", error);
-    res.status(500).json({ error: "Failed to void sale" });
+    return sendMutationError(res, error, "Failed to void sale");
   }
 });
 
@@ -1312,6 +1455,12 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       });
     }
 
+    const stockReturned = await runTransaction(async (session) => {
+    const sale = await Sale.findById(req.params.id).session(session).lean();
+    if (!sale) throw new HttpError(404, "Sale not found");
+    if (sale.type === "reservation" && req.user.role !== "admin") {
+      throw new HttpError(403, "Only admin can delete reservations");
+    }
     const customerId = sale.customerId;
     
     // ✅ FIXED: RETURN STOCK TO INVENTORY WHEN DELETING RESERVATIONS OR SALES
@@ -1335,9 +1484,12 @@ router.delete("/:id", authMiddleware, async (req, res) => {
           const updatedProduct = await Product.findByIdAndUpdate(
             item.productId,
             { $inc: { stock: item.quantity } },
-            { new: true }
+            { new: true, session }
           );
           
+          if (!updatedProduct) {
+            throw new HttpError(409, `Produit introuvable: ${item.name}`);
+          }
           if (updatedProduct) {
             console.log(`✅ Returned ${item.quantity} units of "${item.name}", new stock: ${updatedProduct.stock}`);
           } else {
@@ -1345,22 +1497,26 @@ router.delete("/:id", authMiddleware, async (req, res) => {
           }
         } catch (productError) {
           console.error(`Error returning stock for product ${item.productId}:`, productError);
+          throw productError;
         }
       }
     }
 
     // Delete the sale record
-    await Sale.findByIdAndDelete(req.params.id);
+    await Sale.findByIdAndDelete(req.params.id, { session });
 
     // Update customer statistics (only for sales and reservations, not expenses)
     if (customerId && (sale.type === "sale" || sale.type === "reservation")) {
-      await recalculateCustomerStats(customerId);
+      await recalculateCustomerStats(customerId, session);
     }
+    return (sale.type === "reservation" || sale.type === "sale") &&
+      sale.status !== "voided" && sale.items && sale.items.length > 0;
+    });
 
     res.json({ 
       success: true,
       message: "Sale deleted successfully",
-      stockReturned: (sale.type === "reservation" || sale.type === "sale") && sale.items && sale.items.length > 0
+      stockReturned
     });
   } catch (error) {
     console.error("Error deleting sale:", error);
@@ -1369,7 +1525,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Invalid sale ID" });
     }
     
-    res.status(500).json({ error: "Failed to delete sale" });
+    return sendMutationError(res, error, "Failed to delete sale");
   }
 });
 

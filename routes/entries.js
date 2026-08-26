@@ -3,6 +3,12 @@ const router = express.Router();
 const mongoose = require("mongoose");
 const Entry = require("../models/Entry");
 const authMiddleware = require("../middleware/auth");
+const { normalizeAmountSnapshot } = require("../utils/salePricing");
+const {
+  buildTimeframeFilter: buildBusinessTimeframeFilter,
+  paginationMetadata,
+  parsePagination,
+} = require("../utils/queryHelpers");
 
 // ==================== TIME FRAME HELPER FUNCTIONS ====================
 
@@ -36,6 +42,8 @@ function parseDate(dateStr, isEndDate = false) {
  * @returns {Object} MongoDB date filter { createdAt: { $gte, $lte } }
  */
 function buildTimeframeFilter(query) {
+  return buildBusinessTimeframeFilter(query);
+  /* legacy implementation retained below for reference during rollout */
   const { from, to, date, year, month } = query;
   
   // Priority 1: Custom date range (from and to)
@@ -235,57 +243,68 @@ router.get("/", authMiddleware, async (req, res) => {
       ];
     }
 
-    // Execute query - get ALL records within timeframe (no skip/limit)
-    const entries = await Entry.find(filter)
-      .populate("createdBy", "username email")
-      .populate("updatedBy", "username")
-      .select('-__v') // Exclude version key
-      .sort({ createdAt: -1 }) // Newest first
-      .lean();
-
-    // Get count for metadata
-    const total = entries.length;
+    const { page, limit, skip } = parsePagination(req.query);
+    const [entries, total, summaryResult] = await Promise.all([
+      Entry.find(filter)
+        .populate("createdBy", "username email")
+        .populate("updatedBy", "username")
+        .select("-__v")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Entry.countDocuments(filter),
+      Entry.aggregate([
+        { $match: filter },
+        {
+          $facet: {
+            totals: [{
+              $group: {
+                _id: null,
+                totalAmount: { $sum: "$amount" },
+                activeCount: { $sum: { $cond: [{ $eq: ["$status", "active"] }, 1, 0] } },
+                activeAmount: { $sum: { $cond: [{ $eq: ["$status", "active"] }, "$amount", 0] } },
+                deletedCount: { $sum: { $cond: [{ $eq: ["$status", "deleted"] }, 1, 0] } },
+                deletedAmount: { $sum: { $cond: [{ $eq: ["$status", "deleted"] }, "$amount", 0] } },
+              },
+            }],
+            categories: [{
+              $group: { _id: "$category", count: { $sum: 1 }, amount: { $sum: "$amount" } },
+            }],
+            sources: [{
+              $group: { _id: "$source", count: { $sum: 1 }, amount: { $sum: "$amount" } },
+            }],
+            paymentMethods: [{
+              $group: { _id: "$paymentMethod", count: { $sum: 1 }, amount: { $sum: "$amount" } },
+            }],
+          },
+        },
+      ]),
+    ]);
 
     // Generate timeframe metadata
     const timeframeDescription = getTimeframeDescription(req.query);
     const timeframeFilter = buildTimeframeFilter(req.query);
 
-    // Calculate totals for quick insights
-    const totals = entries.reduce((acc, entry) => {
-      acc.totalAmount += entry.amount;
-      
-      // Count by status
-      if (entry.status === "active") {
-        acc.activeCount += 1;
-        acc.activeAmount += entry.amount;
-      } else if (entry.status === "deleted") {
-        acc.deletedCount += 1;
-        acc.deletedAmount += entry.amount;
-      }
-      
-      // Count by payment method
-      acc.paymentMethods[entry.paymentMethod] = 
-        (acc.paymentMethods[entry.paymentMethod] || 0) + entry.amount;
-      
-      // Count by category
-      acc.categories[entry.category] = 
-        (acc.categories[entry.category] || 0) + entry.amount;
-      
-      return acc;
-    }, {
+    const facet = summaryResult[0] || {};
+    const totals = {
+      ...(facet.totals?.[0] || {
       totalAmount: 0,
       activeCount: 0,
       activeAmount: 0,
       deletedCount: 0,
       deletedAmount: 0,
-      paymentMethods: {},
-      categories: {}
-    });
+      }),
+      paymentMethods: Object.fromEntries((facet.paymentMethods || []).map((item) => [item._id, { count: item.count, amount: item.amount }])),
+      categories: Object.fromEntries((facet.categories || []).map((item) => [item._id, { count: item.count, amount: item.amount }])),
+      sources: Object.fromEntries((facet.sources || []).map((item) => [item._id, { count: item.count, amount: item.amount }])),
+    };
 
     // Prepare response with timeframe metadata
     const response = {
       success: true,
       data: entries,
+      pagination: paginationMetadata(page, limit, total),
       timeframe: {
         description: timeframeDescription,
         start: timeframeFilter.createdAt.$gte.toISOString(),
@@ -310,6 +329,7 @@ router.get("/", authMiddleware, async (req, res) => {
           amount: totals.deletedAmount
         },
         categories: totals.categories,
+        sources: totals.sources,
         paymentMethods: totals.paymentMethods
       },
       filtersApplied: {
@@ -384,7 +404,12 @@ router.post("/", authMiddleware, async (req, res) => {
     }
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
-    const entryAmount = parseFloat(amount);
+    let amountSnapshot;
+    try {
+      amountSnapshot = normalizeAmountSnapshot(req.body);
+    } catch (snapshotError) {
+      return res.status(400).json({ error: snapshotError.message });
+    }
 
     // Generate unique entry ID (like your saleId)
     const entryId = `ENTRY-${Date.now()}-${Math.random()
@@ -394,7 +419,7 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const entryData = {
       entryId,
-      amount: entryAmount,
+      ...amountSnapshot,
       source: source.trim(),
       paymentMethod: normalizedPM,
       category: category.trim(),
@@ -499,6 +524,23 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
     const entryAmount = parseFloat(amount);
+    let amountSnapshot;
+    try {
+      const hasExplicitSnapshot = Boolean(req.body.enteredCurrency);
+      const amountChanged = Number(originalEntry.amount) !== entryAmount;
+      amountSnapshot = hasExplicitSnapshot || amountChanged
+        ? normalizeAmountSnapshot(req.body)
+        : {
+            amount: originalEntry.amount,
+            enteredAmount: originalEntry.enteredAmount ?? originalEntry.amount,
+            enteredCurrency: originalEntry.enteredCurrency ?? "USD",
+            amountUSD: originalEntry.amountUSD ?? originalEntry.amount,
+            amountFC: originalEntry.amountFC,
+            exchangeRate: originalEntry.exchangeRate,
+          };
+    } catch (pricingError) {
+      return res.status(400).json({ error: pricingError.message });
+    }
 
     // Track changes for audit
     const changes = new Map();
@@ -550,7 +592,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const updatedEntry = await Entry.findByIdAndUpdate(
       id,
       {
-        amount: entryAmount,
+        ...amountSnapshot,
         source: source.trim(),
         paymentMethod: normalizedPM,
         category: category.trim(),

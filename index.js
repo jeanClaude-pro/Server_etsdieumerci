@@ -37,6 +37,7 @@ app.use("/api/expenses", require("./routes/expenses")); // ✅ Added expense rou
 app.use("/api/exchange-rates", require("./routes/exchangeRates"));
 app.use("/api/entries", require("./routes/entries"));
 app.use("/api/settings", require("./routes/settings"));
+app.use("/api/analytics", require("./routes/analytics"));
 // Default route
 app.get("/", (req, res) => {
   res.send("ERP/POS System Backend is running...");

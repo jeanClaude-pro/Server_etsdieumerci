@@ -3,6 +3,13 @@ const router = express.Router();
 const Expense = require("../models/Expense");
 const authMiddleware = require("../middleware/auth");
 const nodemailer = require("nodemailer");
+const { normalizeAmountSnapshot } = require("../utils/salePricing");
+const { calculateValidationRate } = require("../utils/financialCalculations");
+const {
+  buildTimeframeFilter: buildBusinessTimeframeFilter,
+  paginationMetadata,
+  parsePagination,
+} = require("../utils/queryHelpers");
 
 // ✅ CREATE EMAIL TRANSPORTER
 const transporter = nodemailer.createTransport({
@@ -47,6 +54,8 @@ function parseDate(dateStr, isEndDate = false) {
  * @returns {Object} MongoDB date filter { createdAt: { $gte, $lte } }
  */
 function buildTimeframeFilter(query) {
+  return buildBusinessTimeframeFilter(query);
+  /* legacy implementation retained below for reference during rollout */
   const { from, to, date, year, month } = query;
   
   // Priority 1: Custom date range (from and to)
@@ -452,49 +461,53 @@ router.get("/", authMiddleware, async (req, res) => {
       ];
     }
 
-    // Execute query - get ALL records within timeframe (no skip/limit)
-    const expenses = await Expense.find(filter)
-      .select('-__v') // Exclude version key
-      .sort({ createdAt: -1 }) // Newest first
-      .lean();
-
-    // Get count for metadata
-    const total = expenses.length;
+    const { page, limit, skip } = parsePagination(req.query);
+    const [expenses, total, summaryResult] = await Promise.all([
+      Expense.find(filter)
+        .select("-__v")
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Expense.countDocuments(filter),
+      Expense.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: null,
+            totalAmount: { $sum: "$amount" },
+            pendingCount: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+            pendingAmount: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, "$amount", 0] } },
+            validatedCount: { $sum: { $cond: [{ $eq: ["$status", "validated"] }, 1, 0] } },
+            validatedAmount: { $sum: { $cond: [{ $eq: ["$status", "validated"] }, "$amount", 0] } },
+            rejectedCount: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] } },
+            rejectedAmount: { $sum: { $cond: [{ $eq: ["$status", "rejected"] }, "$amount", 0] } },
+            averageAmount: { $avg: "$amount" },
+          },
+        },
+      ]),
+    ]);
 
     // Generate timeframe metadata
     const timeframeDescription = getTimeframeDescription(req.query);
     const timeframeFilter = buildTimeframeFilter(req.query);
 
-    // Calculate totals for quick insights
-    const totals = expenses.reduce((acc, expense) => {
-      acc.totalAmount += expense.amount;
-      
-      if (expense.status === "pending") {
-        acc.pendingCount += 1;
-        acc.pendingAmount += expense.amount;
-      } else if (expense.status === "validated") {
-        acc.validatedCount += 1;
-        acc.validatedAmount += expense.amount;
-      } else if (expense.status === "rejected") {
-        acc.rejectedCount += 1;
-        acc.rejectedAmount += expense.amount;
-      }
-      
-      return acc;
-    }, {
+    const totals = summaryResult[0] || {
       totalAmount: 0,
       pendingCount: 0,
       pendingAmount: 0,
       validatedCount: 0,
       validatedAmount: 0,
       rejectedCount: 0,
-      rejectedAmount: 0
-    });
+      rejectedAmount: 0,
+      averageAmount: 0,
+    };
 
     // Prepare response with timeframe metadata
     const response = {
       success: true,
       data: expenses,
+      pagination: paginationMetadata(page, limit, total),
       timeframe: {
         description: timeframeDescription,
         start: timeframeFilter.createdAt.$gte.toISOString(),
@@ -521,7 +534,9 @@ router.get("/", authMiddleware, async (req, res) => {
         rejected: {
           count: totals.rejectedCount,
           amount: totals.rejectedAmount
-        }
+        },
+        averageAmount: totals.averageAmount || 0,
+        validationRate: calculateValidationRate(totals.validatedCount, total),
       },
       filtersApplied: {
         status: status || 'default (all statuses)',
@@ -576,10 +591,12 @@ router.post("/", authMiddleware, async (req, res) => {
       });
     }
 
-    const expenseAmount = parseFloat(amount);
-    if (isNaN(expenseAmount) || expenseAmount <= 0) {
+    let amountSnapshot;
+    try {
+      amountSnapshot = normalizeAmountSnapshot(req.body);
+    } catch (snapshotError) {
       return res.status(400).json({ 
-        error: "Amount must be a positive number" 
+        error: snapshotError.message
       });
     }
 
@@ -603,7 +620,7 @@ router.post("/", authMiddleware, async (req, res) => {
       reason: sanitizedReason,
       recipientName: sanitizedRecipientName,
       recipientPhone: sanitizedRecipientPhone,
-      amount: expenseAmount,
+      ...amountSnapshot,
       paymentMethod: normalizedPM,
       recordedBy: sanitizedRecordedBy,
       notes: sanitizedNotes,
@@ -805,12 +822,30 @@ router.put("/:id", authMiddleware, async (req, res) => {
       });
     }
 
+    let amountSnapshot;
+    try {
+      const hasExplicitSnapshot = Boolean(req.body.enteredCurrency);
+      const amountChanged = Number(existingExpense.amount) !== expenseAmount;
+      amountSnapshot = hasExplicitSnapshot || amountChanged
+        ? normalizeAmountSnapshot(req.body)
+        : {
+            amount: existingExpense.amount,
+            enteredAmount: existingExpense.enteredAmount ?? existingExpense.amount,
+            enteredCurrency: existingExpense.enteredCurrency ?? "USD",
+            amountUSD: existingExpense.amountUSD ?? existingExpense.amount,
+            amountFC: existingExpense.amountFC,
+            exchangeRate: existingExpense.exchangeRate,
+          };
+    } catch (pricingError) {
+      return res.status(400).json({ error: pricingError.message });
+    }
+
     // Prepare update data
     const updateData = {
       reason: sanitizedReason,
       recipientName: sanitizedRecipientName,
       recipientPhone: sanitizedRecipientPhone,
-      amount: expenseAmount,
+      ...amountSnapshot,
       paymentMethod: normalizedPM,
       updatedAt: new Date()
     };

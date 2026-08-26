@@ -1,6 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { normalizeSaleItemPricing } = require("../utils/salePricing");
+const {
+  normalizeAmountSnapshot,
+  normalizeSaleItemPricing,
+} = require("../utils/salePricing");
 
 test("preserves 12000 FC exactly and derives USD without rounding", () => {
   const price = normalizeSaleItemPricing(
@@ -55,4 +58,17 @@ test("preserves integer and decimal USD prices exactly", () => {
 
 test("keeps legacy USD-only items backward compatible", () => {
   assert.deepEqual(normalizeSaleItemPricing({ price: 7.25 }), { price: 7.25 });
+});
+
+test("entry and expense snapshots preserve an exact FC amount", () => {
+  const snapshot = normalizeAmountSnapshot({
+    enteredAmount: 36000,
+    enteredCurrency: "FC",
+    exchangeRate: 2850,
+  });
+
+  assert.equal(snapshot.amountFC, 36000);
+  assert.equal(snapshot.enteredAmount, 36000);
+  assert.equal(snapshot.amountUSD, 36000 / 2850);
+  assert.equal(snapshot.amount, 36000 / 2850);
 });

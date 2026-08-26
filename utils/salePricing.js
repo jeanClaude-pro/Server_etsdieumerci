@@ -56,7 +56,45 @@ function normalizeSaleItemPricing(item, saleExchangeRate) {
   };
 }
 
+function normalizeAmountSnapshot(input, fallbackExchangeRate) {
+  const enteredCurrency = input.enteredCurrency || "USD";
+  if (!SUPPORTED_CURRENCIES.has(enteredCurrency)) {
+    throw new Error("enteredCurrency must be USD or FC");
+  }
+
+  const enteredAmount = toPositiveNumber(
+    input.enteredAmount ?? input.amount,
+    "enteredAmount"
+  );
+  const exchangeRate = normalizeExchangeRate(
+    input.exchangeRate ?? fallbackExchangeRate
+  );
+
+  if (enteredCurrency === "FC" && !exchangeRate) {
+    throw new Error("exchangeRate is required for an FC amount");
+  }
+
+  const amountUSD =
+    enteredCurrency === "USD" ? enteredAmount : enteredAmount / exchangeRate;
+  const amountFC =
+    enteredCurrency === "FC"
+      ? enteredAmount
+      : exchangeRate
+        ? Math.round(enteredAmount * exchangeRate)
+        : undefined;
+
+  return {
+    amount: amountUSD,
+    enteredAmount,
+    enteredCurrency,
+    amountUSD,
+    amountFC,
+    exchangeRate,
+  };
+}
+
 module.exports = {
   normalizeExchangeRate,
+  normalizeAmountSnapshot,
   normalizeSaleItemPricing,
 };
