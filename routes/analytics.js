@@ -62,9 +62,24 @@ async function aggregatePeriod(createdAt) {
               totalSales: { $sum: 1 },
               totalRevenue: { $sum: "$total" },
               reservations: { $sum: { $cond: [{ $eq: ["$type", "reservation"] }, 1, 0] } },
-              customerIds: { $addToSet: { $ifNull: ["$customerId", "$customer.phone"] } },
             },
           }],
+          customerCount: [
+            {
+              $match: {
+                $or: [
+                  { customerId: { $ne: null } },
+                  { "customer.phone": { $nin: [null, ""] } },
+                ],
+              },
+            },
+            {
+              $group: {
+                _id: { $ifNull: ["$customerId", "$customer.phone"] },
+              },
+            },
+            { $count: "total" },
+          ],
           products: [
             { $unwind: "$items" },
             {
@@ -101,7 +116,7 @@ async function aggregatePeriod(createdAt) {
           ],
         },
       },
-    ]),
+    ]).allowDiskUse(true),
     Entry.aggregate([
       { $match: { createdAt, status: "active" } },
       { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: "$amount" } } },
@@ -127,18 +142,16 @@ async function aggregatePeriod(createdAt) {
     totalSales: 0,
     totalRevenue: 0,
     reservations: 0,
-    customerIds: [],
   };
   const entries = entryResult[0] || { count: 0, amount: 0 };
   const expenseFacet = expenseResult[0] || {};
   const validatedExpenses = expenseFacet.validated?.[0] || { count: 0, amount: 0 };
-  const customerIds = (sales.customerIds || []).filter(Boolean);
 
   return {
     totalSales: sales.totalSales,
     totalRevenue: sales.totalRevenue,
     reservationCount: sales.reservations,
-    totalCustomers: customerIds.length,
+    totalCustomers: salesFacet.customerCount?.[0]?.total || 0,
     totalProducts: salesFacet.productCount?.[0]?.total || 0,
     totalEntries: entries.amount,
     entryCount: entries.count,
@@ -200,7 +213,7 @@ router.get("/summary", async (req, res) => {
           },
         },
         { $sort: { _id: 1 } },
-      ]),
+      ]).allowDiskUse(true),
     ]);
 
     const chartData = chartRows.map((row) => ({
@@ -209,8 +222,11 @@ router.get("/summary", async (req, res) => {
       revenue: row.revenue,
     }));
 
+    res.set("Cache-Control", "no-store");
     res.json({
       success: true,
+      source: "mongodb-aggregation",
+      paginated: false,
       timeframe: {
         type: timeframe,
         start: currentRange.$gte,
