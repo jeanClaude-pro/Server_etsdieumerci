@@ -2,6 +2,8 @@ const express = require("express");
 const Sale = require("../models/Sale");
 const Entry = require("../models/Entry");
 const Expense = require("../models/Expense");
+const Creditor = require("../models/Creditor");
+const Loan = require("../models/Loan");
 const authMiddleware = require("../middleware/auth");
 const {
   BUSINESS_TIMEZONE,
@@ -177,6 +179,15 @@ async function aggregatePeriod(createdAt) {
   };
 }
 
+async function aggregateDebt(range) {
+  const [loanRows, repaymentRows, outstandingRows] = await Promise.all([
+    Loan.aggregate([{ $match: { borrowedAt: range } }, { $lookup: { from: "creditors", localField: "creditorId", foreignField: "_id", as: "creditor" } }, { $unwind: "$creditor" }, { $group: { _id: "$creditor.type", amount: { $sum: "$amountUSD" }, count: { $sum: 1 } } }]),
+    Expense.aggregate([{ $match: { expenseType: "repayment", status: "validated", repaymentAppliedAt: range } }, { $group: { _id: null, amount: { $sum: "$amountUSD" }, count: { $sum: 1 } } }]),
+    Creditor.aggregate([{ $group: { _id: "$type", outstanding: { $sum: "$remainingBalance" }, borrowed: { $sum: "$totalBorrowed" }, repaid: { $sum: "$totalRepaid" }, creditors: { $sum: 1 } } }])
+  ]);
+  return { borrowedDuringPeriod: loanRows.reduce((sum, row) => sum + row.amount, 0), repaidDuringPeriod: repaymentRows[0]?.amount || 0, repaymentCount: repaymentRows[0]?.count || 0, currentOutstanding: outstandingRows.reduce((sum, row) => sum + row.outstanding, 0), borrowedByCreditorType: loanRows, outstandingByCreditorType: outstandingRows };
+}
+
 router.get("/summary", async (req, res) => {
   try {
     const timeframe = ["day", "week", "month", "year"].includes(req.query.timeframe)
@@ -193,7 +204,7 @@ router.get("/summary", async (req, res) => {
     };
     if (chart.unit === "week") dateTrunc.startOfWeek = "monday";
 
-    const [current, previous, chartRows] = await Promise.all([
+    const [current, previous, chartRows, debt] = await Promise.all([
       aggregatePeriod(currentRange),
       aggregatePeriod(priorRange),
       Sale.aggregate([
@@ -214,6 +225,7 @@ router.get("/summary", async (req, res) => {
         },
         { $sort: { _id: 1 } },
       ]).allowDiskUse(true),
+      req.user?.role === "admin" ? aggregateDebt(currentRange) : Promise.resolve(null),
     ]);
 
     const chartData = chartRows.map((row) => ({
@@ -243,6 +255,7 @@ router.get("/summary", async (req, res) => {
           revenueGrowth: percentChange(current.totalRevenue, previous.totalRevenue),
           customerGrowth: percentChange(current.totalCustomers, previous.totalCustomers),
         },
+        ...(debt ? { reimbursement: debt } : {}),
       },
     });
   } catch (error) {

@@ -8,9 +8,8 @@ const customerSchema = new mongoose.Schema({
   },
   phone: {
     type: String,
-    required: true,
-    unique: true,
-    trim: true
+    trim: true,
+    default: undefined
   },
   email: {
     type: String,
@@ -36,7 +35,7 @@ const customerSchema = new mongoose.Schema({
 });
 
 // Create index for better query performance
-// NOTE: Removed duplicate index for phone (already created by unique: true)
+customerSchema.index({ phone: 1 }, { unique: true, sparse: true });
 customerSchema.index({ name: "text" });
 customerSchema.index({ totalSpent: -1 });
 

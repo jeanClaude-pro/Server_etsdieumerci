@@ -1,5 +1,6 @@
 // routes/sales.js
 const express = require("express");
+const { rateLimit } = require("express-rate-limit");
 const router = express.Router();
 const mongoose = require("mongoose");
 const Sale = require("../models/Sale");
@@ -16,6 +17,106 @@ const {
   parsePagination,
 } = require("../utils/queryHelpers");
 const { buildStockAdjustments } = require("../utils/stockCalculations");
+const {
+  createReceiptToken,
+  decryptReceiptToken,
+  encryptReceiptToken,
+  hashReceiptToken,
+  normalizeReceiptToken,
+} = require("../utils/receiptTokenCrypto");
+
+const receiptScanLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 180,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many receipt requests. Please try again shortly." },
+});
+
+const receiptTokenLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many reprint requests. Please try again shortly." },
+});
+
+function receiptPayloadGuard(req, res, next) {
+  const contentLength = Number(req.get("content-length") || 0);
+  if (contentLength > 1024 || typeof req.body?.token !== "string" || req.body.token.length > 64) {
+    return res.status(400).json({ code: "INVALID", message: "REÇU INVALIDE" });
+  }
+  next();
+}
+
+function requireReceiptReprintPermission(req, res, next) {
+  const allowed = req.user.role === "admin" ||
+    req.user.actionPermissions?.includes("reprint_receipts");
+  if (!allowed) {
+    return res.status(403).json({ message: "Access denied" });
+  }
+  next();
+}
+
+function receiptResult(sale, code, message) {
+  const approval = sale.receiptVerification || {};
+  return {
+    code,
+    message,
+    receiptNumber: sale.saleNumber || sale.saleId,
+    amount: sale.total,
+    paymentStatus: approval.paymentStatus || "pending",
+    approvedBy: approval.approvedBy?.username || null,
+    approvedAt: approval.approvedAt || null,
+  };
+}
+
+function safeSaleResponse(sale, receiptToken) {
+  const value = typeof sale.toObject === "function" ? sale.toObject() : { ...sale };
+  if (value.receiptVerification) {
+    delete value.receiptVerification.tokenHash;
+    delete value.receiptVerification.tokenCiphertext;
+    delete value.receiptVerification.invalidatedTokenHashes;
+    delete value.receiptVerification.approvedBy;
+  }
+  return receiptToken ? { ...value, receiptToken } : value;
+}
+
+function receiptMaterialSnapshot(sale) {
+  return JSON.stringify({
+    customer: sale.customer || null,
+    isWalkIn: Boolean(sale.isWalkIn),
+    items: (sale.items || []).map((item) => ({
+      productId: String(item.productId || ""),
+      name: item.name,
+      quantity: Number(item.quantity),
+      price: Number(item.price),
+      enteredPrice: item.enteredPrice == null ? null : Number(item.enteredPrice),
+      enteredCurrency: item.enteredCurrency || null,
+      priceUSD: item.priceUSD == null ? null : Number(item.priceUSD),
+      priceFC: item.priceFC == null ? null : Number(item.priceFC),
+      exchangeRate: item.exchangeRate == null ? null : Number(item.exchangeRate),
+      total: Number(item.total),
+    })),
+    subtotal: Number(sale.subtotal),
+    total: Number(sale.total),
+    exchangeRate: sale.exchangeRate == null ? null : Number(sale.exchangeRate),
+    paymentMethod: sale.paymentMethod,
+  });
+}
+
+function requireReceiptRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        code: "ACCESS_DENIED",
+        message: "ACCÈS REFUSÉ",
+        detail: "Vous n'êtes pas autorisé à confirmer ce paiement.",
+      });
+    }
+    next();
+  };
+}
 
 // normalize to the Sale model enum
 function normalizePaymentMethod(pm) {
@@ -32,8 +133,13 @@ function normalizePaymentMethod(pm) {
 
 // Helper function to update customer data (FIXED)
 async function updateCustomerData(customerData, saleTotal, session = null) {
-  const { name, phone, email } = customerData;
+  const { name, email } = customerData;
+  const phone = String(customerData.phone || "").trim() || undefined;
   const now = new Date();
+  if (!phone) {
+    const customer = await Customer.create([{ name, email: email || "", firstPurchaseDate: now, lastPurchaseDate: now, totalPurchases: 1, totalSpent: Number(saleTotal) }], { session });
+    return customer[0]._id;
+  }
   const customer = await Customer.findOneAndUpdate(
     { phone },
     {
@@ -50,7 +156,13 @@ async function updateCustomerData(customerData, saleTotal, session = null) {
 // stats (recalculateCustomerStats recomputes totals afterwards). Used when a
 // sale that had no customer on file (e.g. a walk-in) is later linked to one.
 async function findOrCreateCustomerId(customerData, session = null) {
-  const { name, phone, email } = customerData;
+  const { name, email } = customerData;
+  const phone = String(customerData.phone || "").trim() || undefined;
+  if (!phone) {
+    const customer = new Customer({ name, email: email || "", totalPurchases: 0, totalSpent: 0 });
+    await customer.save({ session });
+    return customer._id;
+  }
   let customer = await Customer.findOne({ phone }).session(session);
   if (!customer) {
     customer = new Customer({
@@ -384,7 +496,15 @@ router.get("/", authMiddleware, async (req, res) => {
             { $sort: { createdAt: -1, _id: -1 } },
             { $skip: skip },
             { $limit: limit },
-            { $project: { __v: 0 } },
+            {
+              $project: {
+                __v: 0,
+                "receiptVerification.tokenHash": 0,
+                "receiptVerification.tokenCiphertext": 0,
+                "receiptVerification.invalidatedTokenHashes": 0,
+                "receiptVerification.approvedBy": 0,
+              },
+            },
           ],
           metadata: [{ $count: "totalRecords" }],
           summary: [{
@@ -640,10 +760,10 @@ router.post("/", authMiddleware, async (req, res) => {
       });
     }
 
-    if (!walkIn && (!customer || !customer.name || !customer.phone)) {
+    if (!walkIn && (!customer || !customer.name)) {
       return res
         .status(400)
-        .json({ error: "Customer name and phone are required" });
+        .json({ error: "Customer name is required" });
     }
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res
@@ -706,9 +826,12 @@ router.post("/", authMiddleware, async (req, res) => {
       ? { name: "Client de passage", phone: "", email: "" }
       : {
           name: customer.name,
-          phone: customer.phone,
+          phone: String(customer.phone || "").trim(),
           email: customer.email || "",
         };
+
+    const effectiveSaleType = type || "sale";
+    const receiptToken = effectiveSaleType === "sale" ? createReceiptToken() : null;
 
     // UPDATED: Include type and reservation fields WITH CORRECT STATUS
     const saleData = {
@@ -724,10 +847,20 @@ router.post("/", authMiddleware, async (req, res) => {
       paymentMethod: normalizedPM,
       status: type === "reservation" ? "pending" : "completed", // ✅ FIXED: Reservations as pending (money received)
       salesPerson: salesPerson || "Admin",
-      type: type || "sale",
+      type: effectiveSaleType,
       reservationDate: reservationDate || null,
       reservationTime: reservationTime || null,
-      notes: notes || ""
+      notes: notes || "",
+      ...(receiptToken
+        ? {
+            receiptVerification: {
+              tokenHash: hashReceiptToken(receiptToken),
+              tokenCiphertext: encryptReceiptToken(receiptToken),
+              version: 1,
+              paymentStatus: "pending",
+            },
+          }
+        : {})
     };
 
     const savedSale = await runTransaction(async (session) => {
@@ -754,7 +887,7 @@ router.post("/", authMiddleware, async (req, res) => {
       return createdSales[0];
     });
 
-    return res.status(201).json(savedSale);
+    return res.status(201).json(safeSaleResponse(savedSale, receiptToken));
   } catch (error) {
     console.error("Error creating sale/expense:", error);
     return sendMutationError(res, error, "Failed to create sale/expense");
@@ -886,7 +1019,15 @@ router.get("/reservations/all", authMiddleware, async (req, res) => {
             { $sort: { createdAt: -1, _id: -1 } },
             { $skip: skip },
             { $limit: limit },
-            { $project: { __v: 0 } },
+            {
+              $project: {
+                __v: 0,
+                "receiptVerification.tokenHash": 0,
+                "receiptVerification.tokenCiphertext": 0,
+                "receiptVerification.invalidatedTokenHashes": 0,
+                "receiptVerification.approvedBy": 0,
+              },
+            },
           ],
           metadata: [{ $count: "totalRecords" }],
           summary: [{
@@ -943,6 +1084,158 @@ router.get("/reservations/all", authMiddleware, async (req, res) => {
 });
 
 // ==================== ALL OTHER ROUTES REMAIN EXACTLY THE SAME ====================
+
+/** ---------- RECEIPT PAYMENT APPROVAL (cashier supervisor/admin only) ---------- **/
+router.post(
+  "/receipt/approve",
+  authMiddleware,
+  receiptScanLimiter,
+  requireReceiptRole(["cashier_supervisor", "admin"]),
+  receiptPayloadGuard,
+  async (req, res) => {
+    try {
+      const token = normalizeReceiptToken(req.body?.token);
+      if (!token) {
+        return res.status(400).json({ code: "INVALID", message: "REÇU INVALIDE" });
+      }
+
+      const tokenHash = hashReceiptToken(token);
+      const approvedAt = new Date();
+      const approved = await Sale.findOneAndUpdate(
+        {
+          type: "sale",
+          status: { $nin: ["voided", "corrected"] },
+          "receiptVerification.tokenHash": tokenHash,
+          "receiptVerification.version": { $gte: 1 },
+          "receiptVerification.paymentStatus": "pending",
+          "receiptVerification.invalidatedAt": null,
+        },
+        {
+          $set: {
+            "receiptVerification.paymentStatus": "approved",
+            "receiptVerification.approvedBy": req.user._id,
+            "receiptVerification.approvedAt": approvedAt,
+          },
+        },
+        { new: true }
+      )
+        .select("+receiptVerification.approvedBy")
+        .populate("receiptVerification.approvedBy", "username");
+
+      if (approved) {
+        return res.json(receiptResult(approved, "APPROVED", "PAIEMENT APPROUVÉ"));
+      }
+
+      const existing = await Sale.findOne({
+        $or: [
+          { "receiptVerification.tokenHash": tokenHash },
+          { "receiptVerification.invalidatedTokenHashes": tokenHash },
+        ],
+      })
+        .select("+receiptVerification.invalidatedTokenHashes +receiptVerification.approvedBy")
+        .populate("receiptVerification.approvedBy", "username");
+
+      if (!existing) {
+        return res.status(404).json({ code: "NOT_FOUND", message: "REÇU INTROUVABLE" });
+      }
+      if (existing.receiptVerification?.invalidatedTokenHashes?.includes(tokenHash)) {
+        return res.status(410).json({ code: "OBSOLETE", message: "REÇU OBSOLÈTE / INVALIDE" });
+      }
+      if (["voided", "corrected"].includes(existing.status) || existing.receiptVerification?.invalidatedAt) {
+        return res.status(410).json({ code: "CANCELLED", message: "REÇU ANNULÉ" });
+      }
+      if (existing.receiptVerification?.paymentStatus === "approved") {
+        return res.json(receiptResult(existing, "ALREADY_APPROVED", "DÉJÀ APPROUVÉ"));
+      }
+      return res.status(409).json({ code: "INVALID", message: "REÇU INVALIDE" });
+    } catch (error) {
+      console.error("Receipt approval error:", error);
+      return res.status(500).json({ code: "ERROR", message: "Échec de la validation du paiement" });
+    }
+  }
+);
+
+/** ---------- RECEIPT PAYMENT VERIFICATION (inventory manager/admin, read-only) ---------- **/
+router.post(
+  "/receipt/verify",
+  authMiddleware,
+  receiptScanLimiter,
+  requireReceiptRole(["inventory_manager", "admin"]),
+  receiptPayloadGuard,
+  async (req, res) => {
+    try {
+      const token = normalizeReceiptToken(req.body?.token);
+      if (!token) {
+        return res.status(400).json({ code: "INVALID", message: "REÇU INVALIDE" });
+      }
+
+      const tokenHash = hashReceiptToken(token);
+      const sale = await Sale.findOne({
+        $or: [
+          { "receiptVerification.tokenHash": tokenHash },
+          { "receiptVerification.invalidatedTokenHashes": tokenHash },
+        ],
+      })
+        .select("+receiptVerification.invalidatedTokenHashes +receiptVerification.approvedBy")
+        .populate("receiptVerification.approvedBy", "username");
+
+      if (!sale) {
+        return res.status(404).json({ code: "NOT_FOUND", message: "REÇU INTROUVABLE" });
+      }
+      if (sale.receiptVerification?.invalidatedTokenHashes?.includes(tokenHash)) {
+        return res.status(410).json({ code: "OBSOLETE", message: "REÇU OBSOLÈTE / INVALIDE" });
+      }
+      if (["voided", "corrected"].includes(sale.status) || sale.receiptVerification?.invalidatedAt) {
+        return res.status(410).json({ code: "CANCELLED", message: "REÇU ANNULÉ" });
+      }
+      if (sale.receiptVerification?.paymentStatus === "approved") {
+        return res.json(receiptResult(sale, "APPROVED", "PAIEMENT APPROUVÉ"));
+      }
+      return res.json(receiptResult(
+        sale,
+        "PENDING",
+        "EN ATTENTE DE VALIDATION DU PAIEMENT"
+      ));
+    } catch (error) {
+      console.error("Receipt verification error:", error);
+      return res.status(500).json({ code: "ERROR", message: "Échec du contrôle du paiement" });
+    }
+  }
+);
+
+/** ---------- RAW TOKEN FOR AUTHENTICATED RECEIPT PRINT/REPRINT ---------- **/
+router.get(
+  "/:id/receipt-token",
+  authMiddleware,
+  receiptTokenLimiter,
+  requireReceiptReprintPermission,
+  async (req, res) => {
+  try {
+    const sale = await Sale.findById(req.params.id)
+      .select(
+        "type status receiptVerification.version receiptVerification.paymentStatus " +
+        "receiptVerification.invalidatedAt +receiptVerification.tokenCiphertext"
+      )
+      .lean();
+    if (!sale || sale.type !== "sale") {
+      return res.status(404).json({ message: "Receipt not found" });
+    }
+    if (["voided", "corrected"].includes(sale.status) || sale.receiptVerification?.invalidatedAt) {
+      return res.status(410).json({ message: "Receipt is no longer valid" });
+    }
+    if (!sale.receiptVerification?.tokenCiphertext) {
+      return res.status(404).json({ message: "This legacy receipt has no QR token" });
+    }
+    return res.json({ receiptToken: decryptReceiptToken(sale.receiptVerification.tokenCiphertext) });
+  } catch (error) {
+    if (error.name === "CastError") {
+      return res.status(400).json({ message: "Invalid sale ID" });
+    }
+    console.error("Receipt token retrieval error:", error);
+    return res.status(500).json({ message: "Failed to retrieve receipt token" });
+  }
+  }
+);
 
 /** ---------- GET BY ID (after other specific routes) ---------- **/
 router.get("/:id", authMiddleware, async (req, res) => {
@@ -1130,15 +1423,15 @@ router.put("/:id", authMiddleware, async (req, res) => {
       });
     }
 
-    if (!walkIn && (!customer || !customer.name || !customer.phone)) {
+    if (!walkIn && (!customer || !customer.name)) {
       return res
         .status(400)
-        .json({ error: "Customer name and phone are required" });
+        .json({ error: "Customer name is required" });
     }
 
     const customerData = walkIn
       ? { name: "Client de passage", phone: "", email: "" }
-      : { name: customer.name, phone: customer.phone, email: customer.email || "" };
+      : { name: customer.name, phone: String(customer.phone || "").trim(), email: customer.email || "" };
 
     // Resolve which customer record (if any) this sale should be linked to:
     // - walk-in sales are never linked to a customer record
@@ -1183,6 +1476,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     const total = subtotal;
+    let replacementReceiptToken = null;
 
     // Track what changed
     if (JSON.stringify(originalSale.customer) !== JSON.stringify(customerData)) {
@@ -1203,10 +1497,61 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     const updatedSale = await runTransaction(async (session) => {
-      const currentSale = await Sale.findById(id).session(session).lean();
+      const currentSale = await Sale.findById(id)
+        .select("+receiptVerification.tokenHash +receiptVerification.invalidatedTokenHashes")
+        .session(session)
+        .lean();
       if (!currentSale) throw new HttpError(404, "Sale not found");
       if (["voided", "corrected"].includes(currentSale.status)) {
         throw new HttpError(409, "Cannot edit a voided or corrected sale");
+      }
+
+      const nextReceiptSnapshot = {
+        customer: customerData,
+        isWalkIn: walkIn,
+        items: enrichedItems,
+        subtotal,
+        total,
+        exchangeRate: transactionExchangeRate,
+        paymentMethod: normalizedPM,
+      };
+      const receiptChanged =
+        currentSale.type === "sale" &&
+        receiptMaterialSnapshot(currentSale) !== receiptMaterialSnapshot(nextReceiptSnapshot);
+      let receiptVerificationUpdate = {};
+      if (receiptChanged) {
+        replacementReceiptToken = createReceiptToken();
+        const previousVerification = currentSale.receiptVerification || {};
+        changes.set("receiptVerification", {
+          from: {
+            version: previousVerification.version || null,
+            paymentStatus: previousVerification.paymentStatus || null,
+            approvedBy: previousVerification.approvedBy || null,
+            approvedAt: previousVerification.approvedAt || null,
+          },
+          to: {
+            version: Number(previousVerification.version || 0) + 1,
+            paymentStatus: "pending",
+          },
+          invalidationReason: reason || "Sale receipt changed",
+        });
+        const invalidatedTokenHashes = [
+          ...(previousVerification.invalidatedTokenHashes || []),
+          ...(previousVerification.tokenHash ? [previousVerification.tokenHash] : []),
+        ];
+        receiptVerificationUpdate = {
+          receiptVerification: {
+            tokenHash: hashReceiptToken(replacementReceiptToken),
+            tokenCiphertext: encryptReceiptToken(replacementReceiptToken),
+            version: Number(previousVerification.version || 0) + 1,
+            paymentStatus: "pending",
+            approvedBy: null,
+            approvedAt: null,
+            invalidatedAt: null,
+            invalidationReason: null,
+            invalidatedTokenHashes: [...new Set(invalidatedTokenHashes)].slice(-20),
+          },
+        };
       }
 
       const customerChanged =
@@ -1252,6 +1597,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
           notes: notes || originalSale.notes,
           editedBy: req.user.username,
           editedAt: new Date(),
+          ...receiptVerificationUpdate,
           $push: {
             editHistory: {
               editedBy: req.user.username,
@@ -1279,7 +1625,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return savedSale;
     });
 
-    res.json(updatedSale);
+    res.json(safeSaleResponse(updatedSale, replacementReceiptToken));
   } catch (error) {
     console.error("Error editing sale:", error);
     if (error.name === "CastError") {
@@ -1383,7 +1729,10 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
     const { reason } = req.body;
 
     const voidedSale = await runTransaction(async (session) => {
-    const sale = await Sale.findById(id).session(session).lean();
+    const sale = await Sale.findById(id)
+      .select("+receiptVerification.tokenHash")
+      .session(session)
+      .lean();
     if (!sale) {
       throw new HttpError(404, "Sale not found");
     }
@@ -1413,6 +1762,12 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
         status: "voided",
         voidedBy: req.user.userId,
         voidedAt: new Date(),
+        ...(sale.receiptVerification?.tokenHash
+          ? {
+              "receiptVerification.invalidatedAt": new Date(),
+              "receiptVerification.invalidationReason": reason || "Sale voided",
+            }
+          : {}),
         $push: {
           editHistory: {
             editedBy: req.user.username,
@@ -1432,7 +1787,7 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
     return updatedSale;
     });
 
-    res.json(voidedSale);
+    res.json(safeSaleResponse(voidedSale));
   } catch (error) {
     console.error("Error voiding sale:", error);
     return sendMutationError(res, error, "Failed to void sale");
@@ -1442,6 +1797,9 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
 /** ---------- DELETE SALE ---------- **/
 router.delete("/:id", authMiddleware, async (req, res) => {
   try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Only admins can delete sales" });
+    }
     const sale = await Sale.findById(req.params.id).lean();
     
     if (!sale) {

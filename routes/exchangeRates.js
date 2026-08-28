@@ -4,7 +4,7 @@ const ExchangeRate = require("../models/ExchangeRate");
 const authMiddleware = require("../middleware/auth");
 
 // GET current active exchange rate
-router.get("/current", async (req, res) => {
+router.get("/current", authMiddleware, async (req, res) => {
   try {
     const currentRate = await ExchangeRate.getCurrentRate();
     

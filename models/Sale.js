@@ -1,5 +1,31 @@
 const mongoose = require("mongoose");
 
+const receiptVerificationSchema = new mongoose.Schema(
+  {
+    tokenHash: { type: String, default: null, select: false },
+    tokenCiphertext: { type: String, default: null, select: false },
+    version: { type: Number, min: 1, default: 1 },
+    paymentStatus: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      default: "pending"
+    },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      select: false
+    },
+    approvedAt: { type: Date, default: null },
+    invalidatedAt: { type: Date, default: null },
+    invalidationReason: { type: String, default: null },
+    // Hashes are safe to retain and let the API distinguish obsolete receipts
+    // without retaining any raw QR token.
+    invalidatedTokenHashes: { type: [String], default: [], select: false }
+  },
+  { _id: false }
+);
+
 const saleItemSchema = new mongoose.Schema({
   productId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -210,6 +236,10 @@ const saleSchema = new mongoose.Schema({
     },
     reason: String
   }],
+  receiptVerification: {
+    type: receiptVerificationSchema,
+    default: undefined
+  },
 }, {
   timestamps: true
 });
@@ -223,6 +253,8 @@ saleSchema.index({ status: 1 });
 saleSchema.index({ type: 1, status: 1, createdAt: -1 });
 saleSchema.index({ paymentMethod: 1, createdAt: -1 });
 saleSchema.index({ customerId: 1, createdAt: -1 });
+saleSchema.index({ "receiptVerification.tokenHash": 1 }, { sparse: true, unique: true });
+saleSchema.index({ "receiptVerification.invalidatedTokenHashes": 1 }, { sparse: true });
 
 // Pre-save middleware to calculate item totals (only for sales with items)
 saleSchema.pre("save", function(next) {

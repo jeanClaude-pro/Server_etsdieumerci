@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const Expense = require("../models/Expense");
+const Creditor = require("../models/Creditor");
+const mongoose = require("mongoose");
 const authMiddleware = require("../middleware/auth");
 const nodemailer = require("nodemailer");
 const { normalizeAmountSnapshot } = require("../utils/salePricing");
@@ -393,7 +395,7 @@ function sanitizeInput(input) {
 
 // Helper to check if user is admin
 function isAdminUser(user) {
-  return user && (user.role === 'admin' || user.isAdmin === true || user.canValidate === true);
+  return user && (user.role === 'admin' || user.isAdmin === true);
 }
 
 // ==================== MAIN EXPENSES ENDPOINT (TIME FRAME PAGINATION) ====================
@@ -585,7 +587,8 @@ router.post("/", authMiddleware, async (req, res) => {
     const { reason, recipientName, recipientPhone, amount, paymentMethod, notes, recordedBy } = req.body;
 
     // Validation
-    if (!reason || !recipientName || !recipientPhone || !amount) {
+    const isRepayment = req.body.expenseType === "repayment";
+    if (!reason || !recipientName || (!isRepayment && !recipientPhone) || !amount || (isRepayment && !req.body.creditorId)) {
       return res.status(400).json({ 
         error: "Reason, recipientName, recipientPhone, and amount are required" 
       });
@@ -603,7 +606,7 @@ router.post("/", authMiddleware, async (req, res) => {
     // Sanitize inputs
     const sanitizedReason = sanitizeInput(reason);
     const sanitizedRecipientName = sanitizeInput(recipientName);
-    const sanitizedRecipientPhone = sanitizeInput(recipientPhone).replace(/\s+/g, "");
+    const sanitizedRecipientPhone = sanitizeInput(recipientPhone || (isRepayment ? "N/A" : "")).replace(/\s+/g, "");
     const sanitizedNotes = sanitizeInput(notes);
     const sanitizedRecordedBy = sanitizeInput(recordedBy || req.user?.id || "Unknown");
 
@@ -615,6 +618,15 @@ router.post("/", authMiddleware, async (req, res) => {
       .substr(2, 5)
       .toUpperCase()}`;
 
+    let creditor = null;
+    if (isRepayment) {
+      creditor = await Creditor.findOne({ _id: req.body.creditorId, isActive: true }).select("name type remainingBalance").lean();
+      if (!creditor) return res.status(400).json({ error: "Selected creditor is unavailable" });
+      if (creditor.remainingBalance + 1e-9 < amountSnapshot.amountUSD) return res.status(409).json({ error: "Repayment exceeds the available debt" });
+    }
+    const actorId = req.user?._id || req.user?.id;
+    const autoValidate = req.user?.role === "admin";
+    const now = new Date();
     const expenseData = {
       expenseId,
       reason: sanitizedReason,
@@ -624,14 +636,35 @@ router.post("/", authMiddleware, async (req, res) => {
       paymentMethod: normalizedPM,
       recordedBy: sanitizedRecordedBy,
       notes: sanitizedNotes,
-      status: "pending"
+      status: autoValidate ? "validated" : "pending",
+      expenseType: isRepayment ? "repayment" : "normal",
+      creditorId: creditor?._id || null,
+      creditorSnapshot: creditor ? { name: creditor.name, type: creditor.type } : undefined,
+      requestedBy: actorId,
+      validatedBy: autoValidate ? sanitizeInput(req.user?.username || actorId) : null,
+      validatedAt: autoValidate ? now : null,
+      repaymentAppliedAt: autoValidate && isRepayment ? now : null,
+      repaymentAppliedBy: autoValidate && isRepayment ? actorId : null
     };
 
-    const expense = new Expense(expenseData);
-    const savedExpense = await expense.save();
+    const session = await mongoose.startSession();
+    let savedExpense;
+    try {
+      await session.withTransaction(async () => {
+        if (autoValidate && isRepayment) {
+          const updated = await Creditor.findOneAndUpdate(
+            { _id: creditor._id, isActive: true, remainingBalance: { $gte: amountSnapshot.amountUSD } },
+            { $inc: { remainingBalance: -amountSnapshot.amountUSD, totalRepaid: amountSnapshot.amountUSD }, $set: { updatedBy: actorId } },
+            { new: true, session }
+          );
+          if (!updated) throw Object.assign(new Error("Repayment exceeds the available debt"), { status: 409 });
+        }
+        [savedExpense] = await Expense.create([expenseData], { session });
+      });
+    } finally { await session.endSession(); }
 
     // Send email notification
-    sendExpenseNotification(savedExpense);
+    if (!autoValidate) sendExpenseNotification(savedExpense);
 
     return res.status(201).json(savedExpense);
   } catch (error) {
@@ -643,7 +676,7 @@ router.post("/", authMiddleware, async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ error: "Expense ID already exists" });
     }
-    return res.status(500).json({ error: "Failed to create expense" });
+    return res.status(error.status || 500).json({ error: error.status ? error.message : "Failed to create expense" });
   }
 });
 
@@ -680,7 +713,7 @@ router.patch("/:id/validate", authMiddleware, async (req, res) => {
     }
 
     if (expense.status === "validated") {
-      return res.status(400).json({ error: "Expense is already validated" });
+      return res.json(expense);
     }
 
     if (expense.status === "rejected") {
@@ -690,16 +723,34 @@ router.patch("/:id/validate", authMiddleware, async (req, res) => {
     const validationNotes = notes ? `Validated: ${notes}` : "Expense validated";
     const updatedNotes = expense.notes ? `${expense.notes}\n${validationNotes}` : validationNotes;
 
-    const updatedExpense = await Expense.findByIdAndUpdate(
-      req.params.id,
-      {
-        status: "validated",
-        validatedBy: validatedBy || req.user?.id || "Admin",
-        validatedAt: new Date(),
-        notes: updatedNotes
-      },
-      { new: true, runValidators: true }
-    );
+    const now = new Date();
+    const actorId = req.user?._id || req.user?.id;
+    const session = await mongoose.startSession();
+    let updatedExpense;
+    try {
+      await session.withTransaction(async () => {
+        const current = await Expense.findOne({ _id: req.params.id }).session(session);
+        if (!current) throw Object.assign(new Error("Expense not found"), { status: 404 });
+        if (current.status === "validated") { updatedExpense = current; return; }
+        if (current.status !== "pending") throw Object.assign(new Error("Cannot validate a rejected expense"), { status: 409 });
+        if (current.expenseType === "repayment") {
+          if (current.repaymentAppliedAt) throw Object.assign(new Error("Repayment was already applied"), { status: 409 });
+          const creditor = await Creditor.findOneAndUpdate(
+            { _id: current.creditorId, isActive: true, remainingBalance: { $gte: current.amountUSD } },
+            { $inc: { remainingBalance: -current.amountUSD, totalRepaid: current.amountUSD }, $set: { updatedBy: actorId } },
+            { new: true, session }
+          );
+          if (!creditor) throw Object.assign(new Error("Repayment exceeds the available debt or creditor is inactive"), { status: 409 });
+          current.repaymentAppliedAt = now;
+          current.repaymentAppliedBy = actorId;
+        }
+        current.status = "validated";
+        current.validatedBy = validatedBy || req.user?.username || String(actorId);
+        current.validatedAt = now;
+        current.notes = updatedNotes;
+        updatedExpense = await current.save({ session });
+      });
+    } finally { await session.endSession(); }
 
     res.json(updatedExpense);
   } catch (error) {
@@ -707,7 +758,7 @@ router.patch("/:id/validate", authMiddleware, async (req, res) => {
     if (error.name === "CastError") {
       return res.status(400).json({ error: "Invalid expense ID" });
     }
-    res.status(500).json({ error: "Failed to validate expense" });
+    res.status(error.status || 500).json({ error: error.status ? error.message : "Failed to validate expense" });
   }
 });
 
@@ -795,6 +846,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     if (!existingExpense) {
       return res.status(404).json({ error: "Expense not found" });
     }
+    if (existingExpense.expenseType === "repayment") return res.status(409).json({ error: "Repayment expenses are immutable; reject a pending request and create a new one" });
 
     // Authorization check for editing validated/rejected expenses
     if (existingExpense.status !== "pending") {
@@ -905,6 +957,7 @@ router.delete("/:id/admin", authMiddleware, async (req, res) => {
     if (!expense) {
       return res.status(404).json({ error: "Expense not found" });
     }
+    if (expense.expenseType === "repayment" && expense.repaymentAppliedAt) return res.status(409).json({ error: "Applied repayments cannot be deleted" });
 
     // Store expense info for response before deletion
     const deletedExpenseInfo = {

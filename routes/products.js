@@ -5,7 +5,7 @@ const authMiddleware = require("../middleware/auth");
 const isAdmin = require("../middleware/isAdmin");
 
 // GET /api/products - Get all products with optional filtering
-router.get("/", async (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   console.log("Fetching products with filters:", req.query);
   try {
     const { search, category, status } = req.query;

@@ -4,6 +4,16 @@ const router = express.Router();
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const generateToken = require("../utils/generateToken");
+const { rateLimit } = require("express-rate-limit");
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { message: "Too many login attempts. Please try again later." },
+});
 
 // Helper: basic field guard
 function required(...fields) {
@@ -18,27 +28,28 @@ router.post("/register", (_req, res) => {
   });
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", loginLimiter, async (req, res) => {
   try {
     let { email, password } = req.body || {};
     email = (email || "").trim().toLowerCase();
     password = String(password || "");
 
-    if (!required(email, password)) {
+    if (!required(email, password) || email.length > 254 || password.length > 128 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ message: "Missing credentials" });
     }
 
     // 1) DO NOT exclude password here; we need it to compare
     // If your schema had `select: false` for password, you'd use `.select("+password")` instead.
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email }).select("+password");
     if (!user) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid email or password" });
     }
 
     // 2) Compare plain password with stored hash
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(401).json({ message: "Invalid email or password" });
     }
 
     // 2b) Check if account is active

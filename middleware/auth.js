@@ -5,7 +5,7 @@ async function authMiddleware(req, res, next) {
   // Get token from header
   const authHeader = req.header("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "No token, authorization denied" });
+    return res.status(401).json({ message: "Authentication required" });
   }
 
   const token = authHeader.split(" ")[1];
@@ -14,7 +14,7 @@ async function authMiddleware(req, res, next) {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const user = await User.findById(decoded.id).select("-password");
+    const user = await User.findById(decoded.id);
 
     if (!user) {
       return res.status(401).json({ message: "User not found" });
@@ -36,8 +36,8 @@ async function authMiddleware(req, res, next) {
 
     next(); // continue to next middleware/route
   } catch (err) {
-    console.error("Invalid token:", err.message);
-    res.status(401).json({ message: "Token is not valid" });
+    console.warn("Authentication rejected:", err.name);
+    res.status(401).json({ message: "Authentication required" });
   }
 }
 

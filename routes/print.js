@@ -3,8 +3,43 @@ const escpos = require('escpos');
 escpos.USB = require('escpos-usb');
 const router = express.Router();
 const authMiddleware = require('../middleware/auth');
+const crypto = require('crypto');
+const Sale = require('../models/Sale');
+const { decryptReceiptToken, normalizeReceiptToken } = require('../utils/receiptTokenCrypto');
 
 router.use(authMiddleware);
+
+async function authorizePrintedReceipt(receiptData) {
+  const submittedToken = normalizeReceiptToken(receiptData?.qrToken);
+  const receiptNumber = String(receiptData?.receiptNumber || '');
+  if (!submittedToken || !receiptNumber || receiptNumber.length > 100) {
+    const error = new Error('Invalid receipt print data');
+    error.status = 400;
+    throw error;
+  }
+  const sale = await Sale.findOne({
+    $or: [{ saleId: receiptNumber }, { saleNumber: receiptNumber }],
+    type: 'sale',
+    status: { $nin: ['voided', 'corrected'] },
+    'receiptVerification.invalidatedAt': null,
+  })
+    .select('+receiptVerification.tokenCiphertext')
+    .lean();
+  if (!sale?.receiptVerification?.tokenCiphertext) {
+    const error = new Error('Receipt is not printable');
+    error.status = 409;
+    throw error;
+  }
+  const currentToken = decryptReceiptToken(sale.receiptVerification.tokenCiphertext);
+  const submitted = Buffer.from(submittedToken, 'utf8');
+  const current = Buffer.from(currentToken, 'utf8');
+  if (submitted.length !== current.length || !crypto.timingSafeEqual(submitted, current)) {
+    const error = new Error('Receipt token does not match the current version');
+    error.status = 409;
+    throw error;
+  }
+  return currentToken;
+}
 
 // Find and use the first available USB printer
 //printer
@@ -22,6 +57,7 @@ function getPrinter() {
 router.post('/receipt', async (req, res) => {
   try {
     const { receiptData, type = 'sale' } = req.body;
+    if (type === 'sale') receiptData.qrToken = await authorizePrintedReceipt(receiptData);
     
     const printer = getPrinter();
     if (!printer) {
@@ -113,6 +149,17 @@ router.post('/receipt', async (req, res) => {
           .text(`Agent: ${receiptData.salesPerson}`)
           .feed(1);
 
+        // The customer receipt carries the opaque payment-control token.
+        // ESC/POS renders it natively at high contrast and a thermal-safe size.
+        if (/^EDM1:[A-Za-z0-9_-]{43}$/.test(String(receiptData.qrToken || ''))) {
+          printer
+            .align('ct')
+            .qrcode(receiptData.qrToken, 6, 'M', 6)
+            .feed(1)
+            .text('SCAN CONTROLE PAIEMENT')
+            .align('lt');
+        }
+
         // Footer
         printer
           .align('ct')
@@ -144,7 +191,7 @@ router.post('/receipt', async (req, res) => {
     });
   } catch (error) {
     console.error('Server error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
   }
 });
 
@@ -152,6 +199,7 @@ router.post('/receipt', async (req, res) => {
 router.post('/stub', async (req, res) => {
   try {
     const { receiptData, type = 'sale' } = req.body;
+    if (type === 'sale') receiptData.qrToken = await authorizePrintedReceipt(receiptData);
     
     const printer = getPrinter();
     if (!printer) {
@@ -214,6 +262,17 @@ router.post('/stub', async (req, res) => {
         // Sales person
         printer.text(`Agent: ${receiptData.salesPerson}`);
 
+        // The stub carries the exact same opaque token/version as the customer receipt.
+        if (/^EDM1:[A-Za-z0-9_-]{43}$/.test(String(receiptData.qrToken || ''))) {
+          printer
+            .feed(1)
+            .align('ct')
+            .qrcode(receiptData.qrToken, 6, 'M', 6)
+            .feed(1)
+            .text('SCAN CONTROLE PAIEMENT')
+            .align('lt');
+        }
+
         // Stub footer
         printer
           .feed(1)
@@ -245,7 +304,7 @@ router.post('/stub', async (req, res) => {
     });
   } catch (error) {
     console.error('Server error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
   }
 });
 

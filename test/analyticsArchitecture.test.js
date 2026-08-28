@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const clientAnalytics = fs.readFileSync(
-  path.join(__dirname, "../../jean-client/src/pages/analytics/Analytics.tsx"),
+  path.join(__dirname, "../../client/src/pages/analytics/Analytics.tsx"),
   "utf8"
 );
 const serverAnalytics = fs.readFileSync(

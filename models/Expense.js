@@ -57,7 +57,16 @@ const expenseSchema = new mongoose.Schema({
   notes: {
     type: String,
     default: ""
-  }
+  },
+  expenseType: { type: String, enum: ["normal", "repayment"], default: "normal", index: true },
+  creditorId: { type: mongoose.Schema.Types.ObjectId, ref: "Creditor", default: null },
+  creditorSnapshot: {
+    name: { type: String, trim: true },
+    type: { type: String, enum: ["person", "bank", "company"] }
+  },
+  requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+  repaymentAppliedAt: { type: Date, default: null },
+  repaymentAppliedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null }
 }, {
   timestamps: true
 });
@@ -68,5 +77,6 @@ expenseSchema.index({ createdAt: -1 });
 expenseSchema.index({ recordedBy: 1 });
 expenseSchema.index({ status: 1, createdAt: -1 });
 expenseSchema.index({ paymentMethod: 1, createdAt: -1 });
+expenseSchema.index({ creditorId: 1, status: 1, repaymentAppliedAt: -1 });
 
 module.exports = mongoose.model("Expense", expenseSchema);

@@ -2,20 +2,28 @@ const express = require("express");
 const router = express.Router();
 const Customer = require("../models/Customer");
 const Sale = require("../models/Sale"); // Make sure to import Sale model
+const authMiddleware = require("../middleware/auth");
+const { validateObjectIdParam } = require("../middleware/security");
+
+router.use(authMiddleware);
+router.param("id", validateObjectIdParam("customer ID"));
 
 // GET /api/customers - Get all customers with optional filtering
 router.get("/", async (req, res) => {
   try {
-    const { page = 1, limit = 50, search } = req.query;
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+    const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
     
     // Build filter object
     const filter = {};
     
     if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { phone: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } }
+        { name: { $regex: escaped, $options: "i" } },
+        { phone: { $regex: escaped, $options: "i" } },
+        { email: { $regex: escaped, $options: "i" } }
       ];
     }
     
@@ -79,6 +87,7 @@ router.get("/phone/:phone", async (req, res) => {
 // POST /api/customers/:id/recalculate - Recalculate customer statistics
 router.post("/:id/recalculate", async (req, res) => {
   try {
+    if (req.user.role !== "admin") return res.status(403).json({ error: "Administrator access required" });
     const customerId = req.params.id;
     
     // FIX: Only get COMPLETED sales (exclude voided and corrected sales)
@@ -148,8 +157,16 @@ router.put("/:id", async (req, res) => {
     const { name, email } = req.body;
     
     const updateData = {};
-    if (name !== undefined) updateData.name = name;
-    if (email !== undefined) updateData.email = email;
+    if (name !== undefined) {
+      const cleanName = String(name).trim();
+      if (!cleanName || cleanName.length > 120) return res.status(400).json({ error: "Invalid name" });
+      updateData.name = cleanName;
+    }
+    if (email !== undefined) {
+      const cleanEmail = String(email).trim().toLowerCase();
+      if (cleanEmail.length > 254 || (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail))) return res.status(400).json({ error: "Invalid email" });
+      updateData.email = cleanEmail;
+    }
     
     const customer = await Customer.findByIdAndUpdate(
       req.params.id,
@@ -181,11 +198,11 @@ router.put("/:id", async (req, res) => {
 // GET /api/customers/stats/top - Get top customers by spending
 router.get("/stats/top", async (req, res) => {
   try {
-    const { limit = 10 } = req.query;
+    const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 10));
     
     const topCustomers = await Customer.find()
       .sort({ totalSpent: -1 })
-      .limit(parseInt(limit));
+      .limit(limit);
     
     res.json(topCustomers);
   } catch (error) {

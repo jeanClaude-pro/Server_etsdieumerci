@@ -3,14 +3,16 @@ const router = express.Router();
 const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const authMiddleware = require("../middleware/auth");
+const { validateObjectIdParam } = require("../middleware/security");
 
 // This account is always hidden from other admins and cannot be modified/deleted by them.
-const SUPER_ADMIN_EMAIL = "jeanclaudesahani@gmail.com";
+const SUPER_ADMIN_EMAIL = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
 
 router.use(authMiddleware);
+router.param("userId", validateObjectIdParam("user ID"));
 
 function isSuperAdmin(user) {
-  return user && user.email === SUPER_ADMIN_EMAIL;
+  return Boolean(SUPER_ADMIN_EMAIL && user && user.email === SUPER_ADMIN_EMAIL);
 }
 
 // Get current user profile
@@ -39,7 +41,7 @@ router.get("/", async (req, res) => {
     );
 
     // Hide the super-admin account unless the requester IS the super-admin
-    if (!isSuperAdmin(req.user)) {
+    if (SUPER_ADMIN_EMAIL && !isSuperAdmin(req.user)) {
       users = users.filter((u) => u.email !== SUPER_ADMIN_EMAIL);
     }
 
@@ -57,7 +59,10 @@ router.post("/", async (req, res) => {
       return res.status(403).json({ message: "Access denied. Admin role required." });
     }
 
-    const { username, email, password, role } = req.body;
+    const username = String(req.body?.username || "").trim();
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = String(req.body?.password || "");
+    const role = req.body?.role;
 
     const validRoles = [
       "admin",
@@ -66,13 +71,16 @@ router.post("/", async (req, res) => {
       "cashier_supervisor",
       "staff",
     ];
+    if (!username || username.length > 80 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      return res.status(400).json({ message: "Invalid username or email" });
+    }
     if (!validRoles.includes(role)) {
       return res.status(400).json({ message: "Invalid role" });
     }
-    if (!password || password.length < 6) {
+    if (password.length < 10 || password.length > 128) {
       return res
         .status(400)
-        .json({ message: "Le mot de passe doit comporter au moins 6 caractères" });
+        .json({ message: "Le mot de passe doit comporter entre 10 et 128 caractères" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -101,7 +109,7 @@ router.put("/:userId/username", async (req, res) => {
     if (req.user.role !== "admin" && targetId !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
-    if (!username || !username.trim()) {
+    if (!username || !username.trim() || username.trim().length > 80) {
       return res.status(400).json({ message: "Le nom d'utilisateur ne peut pas être vide" });
     }
 
@@ -302,7 +310,13 @@ router.put("/:userId/profile", async (req, res) => {
 
     const updateData = {};
     if (username) updateData.username = username.trim();
-    if (email) updateData.email = email.trim().toLowerCase();
+    if (email) {
+      const cleanEmail = String(email).trim().toLowerCase();
+      if (cleanEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        return res.status(400).json({ message: "Invalid email" });
+      }
+      updateData.email = cleanEmail;
+    }
 
     const updated = await User.findByIdAndUpdate(targetId, updateData, {
       new: true,

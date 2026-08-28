@@ -2,15 +2,21 @@ const express = require("express");
 const router = express.Router();
 
 const isAdmin = require("../middleware/isAdmin");
+const authMiddleware = require("../middleware/auth");
 
 const Category = require("../models/Category");
 
-//router.use(isAdmin);
+router.use(authMiddleware);
 
 // Create a new category
-router.post("/", async (req, res) => {
+router.post("/", isAdmin, async (req, res) => {
   try {
-    const newCategories = await Category.create(req.body);
+    const name = String(req.body?.name || "").trim();
+    const description = String(req.body?.description || "").trim();
+    if (!name || name.length > 100 || description.length > 500) {
+      return res.status(400).json({ message: "Invalid category" });
+    }
+    const newCategories = await Category.create({ name, description });
     res.status(201).json(newCategories);
   } catch (error) {
     console.error("Error creating category:", error);
