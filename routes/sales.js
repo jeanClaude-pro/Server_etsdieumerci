@@ -60,6 +60,7 @@ function requireReceiptReprintPermission(req, res, next) {
 
 function receiptResult(sale, code, message) {
   const approval = sale.receiptVerification || {};
+  const exitVerification = approval.exitVerification || {};
   return {
     code,
     message,
@@ -68,6 +69,9 @@ function receiptResult(sale, code, message) {
     paymentStatus: approval.paymentStatus || "pending",
     approvedBy: approval.approvedBy?.username || null,
     approvedAt: approval.approvedAt || null,
+    exitVerified: Boolean(exitVerification.verified),
+    verifiedBy: exitVerification.verifiedBy?.username || null,
+    verifiedAt: exitVerification.verifiedAt || null,
   };
 }
 
@@ -78,6 +82,9 @@ function safeSaleResponse(sale, receiptToken) {
     delete value.receiptVerification.tokenCiphertext;
     delete value.receiptVerification.invalidatedTokenHashes;
     delete value.receiptVerification.approvedBy;
+    if (value.receiptVerification.exitVerification) {
+      delete value.receiptVerification.exitVerification.verifiedBy;
+    }
   }
   return receiptToken ? { ...value, receiptToken } : value;
 }
@@ -431,7 +438,8 @@ router.get("/", authMiddleware, async (req, res) => {
       status,
       type,
       paymentMethod,
-      search
+      search,
+      controlStatus
     } = req.query;
     
     // Build the main filter object
@@ -475,8 +483,8 @@ router.get("/", authMiddleware, async (req, res) => {
     if (status) {
       filter.status = status;
     } else {
-      // Default: include completed, pending, and expense statuses
-      filter.status = { $in: ["completed", "pending", "expense"] };
+      // History includes invalidated sales so their control state is never misleading.
+      filter.status = { $in: ["completed", "pending", "voided", "corrected", "refunded", "expense"] };
     }
     
     // 4. Apply type filter if provided, otherwise use default
@@ -486,10 +494,58 @@ router.get("/", authMiddleware, async (req, res) => {
       // Default: include all types
       filter.type = { $in: ["sale", "reservation", "expense"] };
     }
+
+    const controlFilters = {
+      payment_pending: { "receiptVerification.paymentStatus": "pending" },
+      payment_approved: { "receiptVerification.paymentStatus": "approved" },
+      exit_unverified: {
+        "receiptVerification.paymentStatus": "approved",
+        "receiptVerification.exitVerification.verified": { $ne: true },
+      },
+      exit_verified: { "receiptVerification.exitVerification.verified": true },
+    };
+    if (controlStatus) {
+      if (!controlFilters[controlStatus]) {
+        return res.status(400).json({ error: "Invalid receipt control filter" });
+      }
+      Object.assign(filter, controlFilters[controlStatus]);
+    }
     
     const { page, limit, skip } = parsePagination(req.query);
     const facetResult = await Sale.aggregate([
       { $match: filter },
+      {
+        $lookup: {
+          from: "users",
+          localField: "receiptVerification.approvedBy",
+          foreignField: "_id",
+          as: "receiptApprovedByUser",
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "receiptVerification.exitVerification.verifiedBy",
+          foreignField: "_id",
+          as: "receiptVerifiedByUser",
+        },
+      },
+      {
+        $set: {
+          "receiptVerification.approvedBy": {
+            $let: {
+              vars: { user: { $arrayElemAt: ["$receiptApprovedByUser", 0] } },
+              in: { $cond: ["$$user", { username: "$$user.username" }, null] },
+            },
+          },
+          "receiptVerification.exitVerification.verifiedBy": {
+            $let: {
+              vars: { user: { $arrayElemAt: ["$receiptVerifiedByUser", 0] } },
+              in: { $cond: ["$$user", { username: "$$user.username" }, null] },
+            },
+          },
+        },
+      },
       {
         $facet: {
           data: [
@@ -502,7 +558,8 @@ router.get("/", authMiddleware, async (req, res) => {
                 "receiptVerification.tokenHash": 0,
                 "receiptVerification.tokenCiphertext": 0,
                 "receiptVerification.invalidatedTokenHashes": 0,
-                "receiptVerification.approvedBy": 0,
+                receiptApprovedByUser: 0,
+                receiptVerifiedByUser: 0,
               },
             },
           ],
@@ -581,8 +638,9 @@ router.get("/", authMiddleware, async (req, res) => {
         customerPhone: customerPhone || 'none',
         paymentMethod: paymentMethod || 'none',
         search: search || 'none',
-        status: status || 'default (completed, pending, expense)',
-        type: type || 'default (sale, reservation, expense)'
+        status: status || 'default history statuses',
+        type: type || 'default (sale, reservation, expense)',
+        controlStatus: controlStatus || 'all'
       },
       // Performance warning for large datasets
       performanceNote: total > 1000 
@@ -858,6 +916,7 @@ router.post("/", authMiddleware, async (req, res) => {
               tokenCiphertext: encryptReceiptToken(receiptToken),
               version: 1,
               paymentStatus: "pending",
+              exitVerification: { verified: false },
             },
           }
         : {})
@@ -1145,7 +1204,7 @@ router.post(
         return res.status(410).json({ code: "CANCELLED", message: "REÇU ANNULÉ" });
       }
       if (existing.receiptVerification?.paymentStatus === "approved") {
-        return res.json(receiptResult(existing, "ALREADY_APPROVED", "DÉJÀ APPROUVÉ"));
+        return res.json(receiptResult(existing, "ALREADY_APPROVED", "DÉJÀ PAYÉ / DÉJÀ VALIDÉ"));
       }
       return res.status(409).json({ code: "INVALID", message: "REÇU INVALIDE" });
     } catch (error) {
@@ -1155,7 +1214,7 @@ router.post(
   }
 );
 
-/** ---------- RECEIPT PAYMENT VERIFICATION (inventory manager/admin, read-only) ---------- **/
+/** ---------- RECEIPT EXIT VERIFICATION (never changes paymentStatus) ---------- **/
 router.post(
   "/receipt/verify",
   authMiddleware,
@@ -1170,14 +1229,39 @@ router.post(
       }
 
       const tokenHash = hashReceiptToken(token);
+      const verifiedAt = new Date();
+      const verified = await Sale.findOneAndUpdate({
+        type: "sale",
+        status: { $nin: ["voided", "corrected"] },
+        "receiptVerification.tokenHash": tokenHash,
+        "receiptVerification.version": { $gte: 1 },
+        "receiptVerification.paymentStatus": "approved",
+        "receiptVerification.invalidatedAt": null,
+        "receiptVerification.exitVerification.verified": { $ne: true },
+      }, {
+        $set: {
+          "receiptVerification.exitVerification.verified": true,
+          "receiptVerification.exitVerification.verifiedBy": req.user._id,
+          "receiptVerification.exitVerification.verifiedAt": verifiedAt,
+        },
+      }, { new: true })
+        .select("+receiptVerification.approvedBy +receiptVerification.exitVerification.verifiedBy")
+        .populate("receiptVerification.approvedBy", "username")
+        .populate("receiptVerification.exitVerification.verifiedBy", "username");
+
+      if (verified) {
+        return res.json(receiptResult(verified, "APPROVED", "PAIEMENT APPROUVÉ — SORTIE AUTORISÉE"));
+      }
+
       const sale = await Sale.findOne({
         $or: [
           { "receiptVerification.tokenHash": tokenHash },
           { "receiptVerification.invalidatedTokenHashes": tokenHash },
         ],
       })
-        .select("+receiptVerification.invalidatedTokenHashes +receiptVerification.approvedBy")
-        .populate("receiptVerification.approvedBy", "username");
+        .select("+receiptVerification.invalidatedTokenHashes +receiptVerification.approvedBy +receiptVerification.exitVerification.verifiedBy")
+        .populate("receiptVerification.approvedBy", "username")
+        .populate("receiptVerification.exitVerification.verifiedBy", "username");
 
       if (!sale) {
         return res.status(404).json({ code: "NOT_FOUND", message: "REÇU INTROUVABLE" });
@@ -1189,12 +1273,12 @@ router.post(
         return res.status(410).json({ code: "CANCELLED", message: "REÇU ANNULÉ" });
       }
       if (sale.receiptVerification?.paymentStatus === "approved") {
-        return res.json(receiptResult(sale, "APPROVED", "PAIEMENT APPROUVÉ"));
+        return res.json(receiptResult(sale, "ALREADY_VERIFIED", "DÉJÀ CONTRÔLÉ À LA SORTIE"));
       }
       return res.json(receiptResult(
         sale,
         "PENDING",
-        "EN ATTENTE DE VALIDATION DU PAIEMENT"
+        "PAIEMENT NON ENCORE APPROUVÉ — SORTIE NON AUTORISÉE"
       ));
     } catch (error) {
       console.error("Receipt verification error:", error);
@@ -1547,6 +1631,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
             paymentStatus: "pending",
             approvedBy: null,
             approvedAt: null,
+            exitVerification: { verified: false, verifiedBy: null, verifiedAt: null },
             invalidatedAt: null,
             invalidationReason: null,
             invalidatedTokenHashes: [...new Set(invalidatedTokenHashes)].slice(-20),

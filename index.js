@@ -76,7 +76,31 @@ app.use((req, res, next) => {
 
 // Env variables
 const PORT = process.env.PORT || 5000;
-const MONGO_URI = process.env.MONGO_URI;
+
+function getMongoUri() {
+  const uri = process.env.MONGO_URI;
+  const parsed = new URL(uri);
+
+  // This network's DNS proxy returns EBADRESP for Atlas SRV queries. Use the
+  // equivalent seed list for this cluster so Node does ordinary A/AAAA lookups.
+  if (parsed.protocol !== "mongodb+srv:" || parsed.hostname !== "cluster0.dckjabm.mongodb.net") {
+    return uri;
+  }
+
+  const hosts = [
+    "ac-rchorki-shard-00-00.dckjabm.mongodb.net:27017",
+    "ac-rchorki-shard-00-01.dckjabm.mongodb.net:27017",
+    "ac-rchorki-shard-00-02.dckjabm.mongodb.net:27017",
+  ].join(",");
+  const params = new URLSearchParams(parsed.searchParams);
+  params.set("tls", "true");
+  params.set("authSource", "admin");
+  params.set("replicaSet", "atlas-9ou3vz-shard-0");
+
+  return `mongodb://${parsed.username}:${parsed.password}@${hosts}${parsed.pathname}?${params}`;
+}
+
+const MONGO_URI = getMongoUri();
 
 // ====== Use Routes ======
 app.use("/api/products", require("./routes/products"));

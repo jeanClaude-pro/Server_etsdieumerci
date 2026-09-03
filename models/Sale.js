@@ -1,5 +1,19 @@
 const mongoose = require("mongoose");
 
+const exitVerificationSchema = new mongoose.Schema(
+  {
+    verified: { type: Boolean, default: false },
+    verifiedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      select: false
+    },
+    verifiedAt: { type: Date, default: null }
+  },
+  { _id: false }
+);
+
 const receiptVerificationSchema = new mongoose.Schema(
   {
     tokenHash: { type: String, default: null, select: false },
@@ -19,6 +33,10 @@ const receiptVerificationSchema = new mongoose.Schema(
     approvedAt: { type: Date, default: null },
     invalidatedAt: { type: Date, default: null },
     invalidationReason: { type: String, default: null },
+    exitVerification: {
+      type: exitVerificationSchema,
+      default: () => ({ verified: false })
+    },
     // Hashes are safe to retain and let the API distinguish obsolete receipts
     // without retaining any raw QR token.
     invalidatedTokenHashes: { type: [String], default: [], select: false }

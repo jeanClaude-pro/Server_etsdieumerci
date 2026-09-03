@@ -18,6 +18,7 @@ test("receipt secrets are excluded from ordinary Sale queries", () => {
     "receiptVerification.tokenCiphertext",
     "receiptVerification.invalidatedTokenHashes",
     "receiptVerification.approvedBy",
+    "receiptVerification.exitVerification.verifiedBy",
   ]) {
     assert.equal(Sale.schema.path(field).options.select, false);
   }
@@ -34,7 +35,7 @@ test("approval and verification have distinct server-side role boundaries", () =
   );
 });
 
-test("approval is atomic and verification route is read-only", () => {
+test("approval and exit verification are atomic and remain independent", () => {
   const approvalStart = salesRoutes.indexOf('"/receipt/approve"');
   const verificationStart = salesRoutes.indexOf('"/receipt/verify"');
   const receiptTokenStart = salesRoutes.indexOf('"/:id/receipt-token"');
@@ -43,7 +44,11 @@ test("approval is atomic and verification route is read-only", () => {
 
   assert.match(approvalBlock, /Sale\.findOneAndUpdate\(/);
   assert.match(approvalBlock, /"receiptVerification\.paymentStatus": "pending"/);
-  assert.doesNotMatch(verificationBlock, /findOneAndUpdate|updateOne|\.save\(/);
+  assert.match(verificationBlock, /Sale\.findOneAndUpdate\(/);
+  assert.match(verificationBlock, /"receiptVerification\.paymentStatus": "approved"/);
+  assert.match(verificationBlock, /"receiptVerification\.exitVerification\.verified": \{ \$ne: true \}/);
+  assert.match(verificationBlock, /"receiptVerification\.exitVerification\.verified": true/);
+  assert.doesNotMatch(verificationBlock, /"receiptVerification\.paymentStatus"\s*:\s*"approved"[\s\S]*?\$set\s*:\s*\{[\s\S]*?"receiptVerification\.paymentStatus"/);
   assert.match(verificationBlock, /"PENDING"/);
 });
 
@@ -103,6 +108,7 @@ test("raw-token retrieval is permission protected and rate limited", () => {
 test("obsolete hashes are bounded and edits reset approval", () => {
   assert.match(salesRoutes, /invalidatedTokenHashes:[\s\S]*?\.slice\(-20\)/);
   assert.match(salesRoutes, /paymentStatus: "pending",[\s\S]*?approvedBy: null,[\s\S]*?approvedAt: null/);
+  assert.match(salesRoutes, /exitVerification: \{ verified: false, verifiedBy: null, verifiedAt: null \}/);
 });
 
 test("customer receipt and sale stub print the same opaque token", () => {
