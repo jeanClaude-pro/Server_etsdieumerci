@@ -11,6 +11,10 @@ const newSalePage = fs.readFileSync(
   path.join(__dirname, "../../client/src/pages/NewSale.tsx"),
   "utf8"
 );
+const scannerPage = fs.readFileSync(
+  path.join(__dirname, "../../client/src/components/ReceiptScannerPage.tsx"),
+  "utf8"
+);
 
 test("receipt secrets are excluded from ordinary Sale queries", () => {
   for (const field of [
@@ -24,15 +28,27 @@ test("receipt secrets are excluded from ordinary Sale queries", () => {
   }
 });
 
-test("approval and verification have distinct server-side role boundaries", () => {
-  assert.match(
-    salesRoutes,
-    /"\/receipt\/approve"[\s\S]*?requireReceiptRole\(\["cashier_supervisor", "admin"\]\)/
-  );
-  assert.match(
-    salesRoutes,
-    /"\/receipt\/verify"[\s\S]*?requireReceiptRole\(\["inventory_manager", "admin"\]\)/
-  );
+test("approval and verification are available to every authenticated active user", () => {
+  const approvalStart = salesRoutes.indexOf('"/receipt/approve"');
+  const verificationStart = salesRoutes.indexOf('"/receipt/verify"');
+  const receiptTokenStart = salesRoutes.indexOf('"/:id/receipt-token"');
+  const approvalBlock = salesRoutes.slice(approvalStart, verificationStart);
+  const verificationBlock = salesRoutes.slice(verificationStart, receiptTokenStart);
+
+  assert.match(approvalBlock, /authMiddleware,[\s\S]*?receiptScanLimiter,[\s\S]*?receiptPayloadGuard/);
+  assert.match(verificationBlock, /authMiddleware,[\s\S]*?receiptScanLimiter,[\s\S]*?receiptPayloadGuard/);
+  assert.doesNotMatch(approvalBlock, /requireReceiptRole/);
+  assert.doesNotMatch(verificationBlock, /requireReceiptRole/);
+});
+
+test("camera scanning remains active between receipt reads", () => {
+  const callbackStart = scannerPage.indexOf("(decoded) => {");
+  const callbackEnd = scannerPage.indexOf("setCameraActive(true)", callbackStart);
+  const decodeCallback = scannerPage.slice(callbackStart, callbackEnd);
+
+  assert.match(decodeCallback, /submitToken\(decoded\.getText\(\)\)/);
+  assert.doesNotMatch(decodeCallback, /controlsRef\.current\?\.stop\(\)/);
+  assert.doesNotMatch(decodeCallback, /setCameraActive\(false\)/);
 });
 
 test("approval and exit verification are atomic and remain independent", () => {

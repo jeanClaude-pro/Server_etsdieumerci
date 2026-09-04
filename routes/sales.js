@@ -30,6 +30,7 @@ const receiptScanLimiter = rateLimit({
   limit: 180,
   standardHeaders: true,
   legacyHeaders: false,
+  skipSuccessfulRequests: true,
   message: { message: "Too many receipt requests. Please try again shortly." },
 });
 
@@ -110,19 +111,6 @@ function receiptMaterialSnapshot(sale) {
     exchangeRate: sale.exchangeRate == null ? null : Number(sale.exchangeRate),
     paymentMethod: sale.paymentMethod,
   });
-}
-
-function requireReceiptRole(allowedRoles) {
-  return (req, res, next) => {
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({
-        code: "ACCESS_DENIED",
-        message: "ACCÈS REFUSÉ",
-        detail: "Vous n'êtes pas autorisé à confirmer ce paiement.",
-      });
-    }
-    next();
-  };
 }
 
 // normalize to the Sale model enum
@@ -1149,7 +1137,6 @@ router.post(
   "/receipt/approve",
   authMiddleware,
   receiptScanLimiter,
-  requireReceiptRole(["cashier_supervisor", "admin"]),
   receiptPayloadGuard,
   async (req, res) => {
     try {
@@ -1219,7 +1206,6 @@ router.post(
   "/receipt/verify",
   authMiddleware,
   receiptScanLimiter,
-  requireReceiptRole(["inventory_manager", "admin"]),
   receiptPayloadGuard,
   async (req, res) => {
     try {
