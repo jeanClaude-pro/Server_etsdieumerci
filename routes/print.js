@@ -9,6 +9,38 @@ const { decryptReceiptToken, normalizeReceiptToken } = require('../utils/receipt
 
 router.use(authMiddleware);
 
+function fcUnitPrice(item, saleRate) {
+  if (item.enteredCurrency === 'FC' && Number.isFinite(Number(item.enteredPrice))) return Number(item.enteredPrice);
+  if (Number.isFinite(Number(item.priceFC))) return Number(item.priceFC);
+  const rate = Number(item.exchangeRate ?? saleRate);
+  const usd = Number(item.priceUSD ?? item.unitPrice ?? item.price);
+  return Number.isFinite(rate) && rate > 0 && Number.isFinite(usd) ? Math.round(usd * rate) : undefined;
+}
+
+function formatFc(value) {
+  return `${Math.round(value).toLocaleString('fr-FR').replace(/\s/g, ' ')}FC`;
+}
+
+function dualItemAmount(item, quantity, saleRate) {
+  const usd = Number(item.priceUSD ?? item.unitPrice ?? item.price) * quantity;
+  const fcUnit = fcUnitPrice(item, saleRate);
+  return `${usd.toFixed(2)}$${fcUnit === undefined ? '' : ` / ${formatFc(fcUnit * quantity)}`}`;
+}
+
+function dualSaleTotal(receiptData) {
+  const items = Array.isArray(receiptData.items) ? receiptData.items : [];
+  const fcTotals = items.map((item) => {
+    const unit = fcUnitPrice(item, receiptData.exchangeRate);
+    return unit === undefined ? undefined : unit * Number(item.quantity);
+  });
+  const fc = fcTotals.length && fcTotals.every((value) => value !== undefined)
+    ? fcTotals.reduce((sum, value) => sum + value, 0)
+    : Number.isFinite(Number(receiptData.exchangeRate))
+      ? Math.round(Number(receiptData.total) * Number(receiptData.exchangeRate))
+      : undefined;
+  return `${Number(receiptData.total).toFixed(2)}$${fc === undefined ? '' : ` / ${formatFc(fc)}`}`;
+}
+
 async function authorizePrintedReceipt(receiptData) {
   const submittedToken = normalizeReceiptToken(receiptData?.qrToken);
   const receiptNumber = String(receiptData?.receiptNumber || '');
@@ -115,21 +147,12 @@ router.post('/receipt', async (req, res) => {
 
         receiptData.items.forEach((item) => {
           const quantity = Number(item.quantity);
-          const usdUnitPrice = Number(item.priceUSD ?? item.unitPrice);
-          if (item.enteredCurrency === 'FC' && Number.isFinite(Number(item.enteredPrice))) {
-            const exactFcUnitPrice = Number(item.enteredPrice);
-            printer
-              .text(`${quantity}x ${item.name}`)
-              .text(`PU: ${exactFcUnitPrice.toLocaleString('fr-FR')} FC`)
-              .text(`PT: ${(exactFcUnitPrice * quantity).toLocaleString('fr-FR')} FC`)
-              .text(`Eq. USD: $${(usdUnitPrice * quantity).toFixed(2)}`);
-          } else {
-            printer
-              .text(`${quantity}x ${item.name}`)
-              .align('rt')
-              .text(`$${(usdUnitPrice * quantity).toFixed(2)}`)
-              .align('lt');
-          }
+          const name = String(item.name || '').slice(0, 32);
+          printer
+            .text(`${quantity}x ${name}`)
+            .align('rt')
+            .text(dualItemAmount(item, quantity, receiptData.exchangeRate))
+            .align('lt');
         });
 
         // Total
@@ -138,7 +161,7 @@ router.post('/receipt', async (req, res) => {
           .style('b')
           .text('TOTAL:')
           .align('rt')
-          .text(`$${receiptData.total.toFixed(2)}`)
+          .text(dualSaleTotal(receiptData))
           .align('lt')
           .text(`Paiement: ${receiptData.paymentMethod.toUpperCase()}`)
           .feed(1);
@@ -243,19 +266,16 @@ router.post('/stub', async (req, res) => {
 
         receiptData.items.forEach((item) => {
           const quantity = Number(item.quantity);
-          printer.text(`${quantity}x ${item.name}`);
-          if (item.enteredCurrency === 'FC' && Number.isFinite(Number(item.enteredPrice))) {
-            printer.text(
-              `${(Number(item.enteredPrice) * quantity).toLocaleString('fr-FR')} FC`
-            );
-          }
+          printer
+            .text(`${quantity}x ${String(item.name || '').slice(0, 32)}`)
+            .text(dualItemAmount(item, quantity, receiptData.exchangeRate));
         });
 
         // Total
         printer
           .feed(1)
           .style('b')
-          .text(`Total: $${receiptData.total.toFixed(2)}`)
+          .text(`Total: ${dualSaleTotal(receiptData)}`)
           .text(`Paiement: ${receiptData.paymentMethod.toUpperCase()}`)
           .feed(1);
 

@@ -17,6 +17,7 @@ const {
   parsePagination,
 } = require("../utils/queryHelpers");
 const { buildStockAdjustments } = require("../utils/stockCalculations");
+const { buildScanStatsPipeline, RECEIPT_SCANNER_CUTOFF } = require("../utils/scanStats");
 const {
   createReceiptToken,
   decryptReceiptToken,
@@ -496,14 +497,19 @@ router.get("/", authMiddleware, async (req, res) => {
       filter.type = { $in: ["sale", "reservation", "expense"] };
     }
 
+    const postRollout = { createdAt: { $gte: RECEIPT_SCANNER_CUTOFF } };
+    const legacyOr = (condition) => ({
+      $or: [{ createdAt: { $lt: RECEIPT_SCANNER_CUTOFF } }, condition],
+    });
     const controlFilters = {
-      payment_pending: { "receiptVerification.paymentStatus": "pending" },
-      payment_approved: { "receiptVerification.paymentStatus": "approved" },
-      exit_unverified: {
-        "receiptVerification.paymentStatus": "approved",
-        "receiptVerification.exitVerification.verified": { $ne: true },
-      },
-      exit_verified: { "receiptVerification.exitVerification.verified": true },
+      payment_pending: { $and: [postRollout, { "receiptVerification.paymentStatus": { $ne: "approved" } }] },
+      payment_approved: legacyOr({ "receiptVerification.paymentStatus": "approved" }),
+      exit_unverified: { $and: [
+        postRollout,
+        { "receiptVerification.paymentStatus": "approved" },
+        { "receiptVerification.exitVerification.verified": { $ne: true } },
+      ] },
+      exit_verified: legacyOr({ "receiptVerification.exitVerification.verified": true }),
     };
     if (controlStatus) {
       if (!controlFilters[controlStatus]) {
@@ -673,6 +679,47 @@ router.get("/", authMiddleware, async (req, res) => {
       error: "Failed to fetch sales",
       suggestion: "Check your query parameters and try again"
     });
+  }
+});
+
+/** Lightweight receipt-control totals for the complete matching sale period. */
+router.get("/scan-stats", authMiddleware, async (req, res) => {
+  try {
+    const match = buildBusinessTimeframeFilter(req.query);
+
+    if (req.query.customerPhone) match["customer.phone"] = req.query.customerPhone;
+    if (req.query.paymentMethod) {
+      match.paymentMethod = normalizePaymentMethod(req.query.paymentMethod);
+    }
+    if (req.query.search) {
+      const escaped = String(req.query.search).slice(0, 100)
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const search = { $regex: escaped, $options: "i" };
+      match.$or = [
+        { saleId: search },
+        { saleNumber: search },
+        { "customer.name": search },
+        { "customer.phone": search },
+        { salesPerson: search },
+        { "items.name": search },
+      ];
+    }
+
+    const rows = await Sale.aggregate(buildScanStatsPipeline(match));
+    res.set("Cache-Control", "no-store");
+    return res.json(rows[0] || {
+      total: 0,
+      paymentApproved: 0,
+      paymentPending: 0,
+      exitControlled: 0,
+      awaitingExitControl: 0,
+    });
+  } catch (error) {
+    if (/Invalid date|Invalid year|Invalid month|Start date/.test(error.message)) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error("Receipt scan statistics failed:", error);
+    return res.status(500).json({ error: "Failed to calculate receipt scan statistics" });
   }
 });
 
