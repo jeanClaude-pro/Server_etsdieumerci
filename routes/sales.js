@@ -90,6 +90,19 @@ function safeSaleResponse(sale, receiptToken) {
   return receiptToken ? { ...value, receiptToken } : value;
 }
 
+function requireReceiptRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        code: "ACCESS_DENIED",
+        message: "ACCÈS REFUSÉ",
+        detail: "Votre rôle n'est pas autorisé à effectuer cette opération.",
+      });
+    }
+    next();
+  };
+}
+
 function receiptMaterialSnapshot(sale) {
   return JSON.stringify({
     customer: sale.customer || null,
@@ -1137,6 +1150,7 @@ router.post(
   "/receipt/approve",
   authMiddleware,
   receiptScanLimiter,
+  requireReceiptRole(["cashier_supervisor", "admin"]),
   receiptPayloadGuard,
   async (req, res) => {
     try {
@@ -1206,6 +1220,7 @@ router.post(
   "/receipt/verify",
   authMiddleware,
   receiptScanLimiter,
+  requireReceiptRole(["inventory_manager", "admin"]),
   receiptPayloadGuard,
   async (req, res) => {
     try {

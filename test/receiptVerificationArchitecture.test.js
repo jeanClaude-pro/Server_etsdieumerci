@@ -28,17 +28,21 @@ test("receipt secrets are excluded from ordinary Sale queries", () => {
   }
 });
 
-test("approval and verification are available to every authenticated active user", () => {
+test("approval and verification enforce distinct operational roles", () => {
   const approvalStart = salesRoutes.indexOf('"/receipt/approve"');
   const verificationStart = salesRoutes.indexOf('"/receipt/verify"');
   const receiptTokenStart = salesRoutes.indexOf('"/:id/receipt-token"');
   const approvalBlock = salesRoutes.slice(approvalStart, verificationStart);
   const verificationBlock = salesRoutes.slice(verificationStart, receiptTokenStart);
 
-  assert.match(approvalBlock, /authMiddleware,[\s\S]*?receiptScanLimiter,[\s\S]*?receiptPayloadGuard/);
-  assert.match(verificationBlock, /authMiddleware,[\s\S]*?receiptScanLimiter,[\s\S]*?receiptPayloadGuard/);
-  assert.doesNotMatch(approvalBlock, /requireReceiptRole/);
-  assert.doesNotMatch(verificationBlock, /requireReceiptRole/);
+  assert.match(
+    approvalBlock,
+    /authMiddleware,[\s\S]*?receiptScanLimiter,[\s\S]*?requireReceiptRole\(\["cashier_supervisor", "admin"\]\),[\s\S]*?receiptPayloadGuard/
+  );
+  assert.match(
+    verificationBlock,
+    /authMiddleware,[\s\S]*?receiptScanLimiter,[\s\S]*?requireReceiptRole\(\["inventory_manager", "admin"\]\),[\s\S]*?receiptPayloadGuard/
+  );
 });
 
 test("camera scanning remains active between receipt reads", () => {
