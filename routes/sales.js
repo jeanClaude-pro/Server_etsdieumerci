@@ -578,14 +578,29 @@ router.get("/", authMiddleware, async (req, res) => {
           summary: [{
             $group: {
               _id: null,
+              // Revenue/count only ever reflect completed sales — voided,
+              // corrected, refunded, and pending rows must not inflate totals
+              // even though the history list (unfiltered) still shows them.
               totalRevenue: {
-                $sum: { $cond: [{ $ne: ["$type", "expense"] }, "$total", 0] },
+                $sum: {
+                  $cond: [
+                    { $and: [{ $ne: ["$type", "expense"] }, { $eq: ["$status", "completed"] }] },
+                    "$total",
+                    0,
+                  ],
+                },
               },
               totalExpenses: {
                 $sum: { $cond: [{ $eq: ["$type", "expense"] }, "$total", 0] },
               },
               saleCount: {
-                $sum: { $cond: [{ $ne: ["$type", "expense"] }, 1, 0] },
+                $sum: {
+                  $cond: [
+                    { $and: [{ $ne: ["$type", "expense"] }, { $eq: ["$status", "completed"] }] },
+                    1,
+                    0,
+                  ],
+                },
               },
               expenseCount: {
                 $sum: { $cond: [{ $eq: ["$type", "expense"] }, 1, 0] },
