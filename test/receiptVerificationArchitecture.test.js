@@ -8,11 +8,11 @@ const receiptCrypto = require("../utils/receiptTokenCrypto");
 const salesRoutes = fs.readFileSync(path.join(__dirname, "../routes/sales.js"), "utf8");
 const printRoutes = fs.readFileSync(path.join(__dirname, "../routes/print.js"), "utf8");
 const newSalePage = fs.readFileSync(
-  path.join(__dirname, "../../client/src/pages/NewSale.tsx"),
+  path.join(__dirname, "../../jean-client/src/pages/NewSale.tsx"),
   "utf8"
 );
 const scannerPage = fs.readFileSync(
-  path.join(__dirname, "../../client/src/components/ReceiptScannerPage.tsx"),
+  path.join(__dirname, "../../jean-client/src/components/ReceiptScannerPage.tsx"),
   "utf8"
 );
 
@@ -50,7 +50,7 @@ test("camera scanning remains active between receipt reads", () => {
   const callbackEnd = scannerPage.indexOf("setCameraActive(true)", callbackStart);
   const decodeCallback = scannerPage.slice(callbackStart, callbackEnd);
 
-  assert.match(decodeCallback, /submitToken\(decoded\.getText\(\)\)/);
+  assert.match(decodeCallback, /enqueueToken\(decoded\.getText\(\)\)/);
   assert.doesNotMatch(decodeCallback, /controlsRef\.current\?\.stop\(\)/);
   assert.doesNotMatch(decodeCallback, /setCameraActive\(false\)/);
 });

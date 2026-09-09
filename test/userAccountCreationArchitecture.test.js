@@ -5,7 +5,7 @@ const path = require("node:path");
 
 const usersRoute = fs.readFileSync(path.join(__dirname, "../routes/users.js"), "utf8");
 const adminPanel = fs.readFileSync(
-  path.join(__dirname, "../../client/src/pages/admin/AdminPanel.tsx"),
+  path.join(__dirname, "../../jean-client/src/pages/admin/AdminPanel.tsx"),
   "utf8"
 );
 

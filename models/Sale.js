@@ -14,6 +14,24 @@ const exitVerificationSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Records that payment approval and/or exit control were completed by an
+// admin's manual override (scanner unavailable, historical data correction)
+// rather than by an actual scan, so the two paths stay distinguishable for audit.
+const manualOverrideSchema = new mongoose.Schema(
+  {
+    overridden: { type: Boolean, default: false },
+    overriddenBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      select: false
+    },
+    overriddenAt: { type: Date, default: null },
+    reason: { type: String, default: null }
+  },
+  { _id: false }
+);
+
 const receiptVerificationSchema = new mongoose.Schema(
   {
     tokenHash: { type: String, default: null, select: false },
@@ -36,6 +54,10 @@ const receiptVerificationSchema = new mongoose.Schema(
     exitVerification: {
       type: exitVerificationSchema,
       default: () => ({ verified: false })
+    },
+    manualOverride: {
+      type: manualOverrideSchema,
+      default: () => ({ overridden: false })
     },
     // Hashes are safe to retain and let the API distinguish obsolete receipts
     // without retaining any raw QR token.

@@ -64,9 +64,9 @@ test("duplicate scanner attempts cannot alter aggregate counts", () => {
 
 test("all receipt paths render compact USD and exact historical FC snapshots", () => {
   const serverPrint = fs.readFileSync(path.join(__dirname, "../routes/print.js"), "utf8");
-  const newSale = fs.readFileSync(path.join(__dirname, "../../client/src/pages/NewSale.tsx"), "utf8");
-  const history = fs.readFileSync(path.join(__dirname, "../../client/src/pages/history/SalesHistory.tsx"), "utf8");
-  const reservation = fs.readFileSync(path.join(__dirname, "../../client/src/pages/Reservation.tsx"), "utf8");
+  const newSale = fs.readFileSync(path.join(__dirname, "../../jean-client/src/pages/NewSale.tsx"), "utf8");
+  const history = fs.readFileSync(path.join(__dirname, "../../jean-client/src/pages/history/SalesHistory.tsx"), "utf8");
+  const reservation = fs.readFileSync(path.join(__dirname, "../../jean-client/src/pages/Reservation.tsx"), "utf8");
   assert.match(serverPrint, /enteredCurrency === 'FC'.*enteredPrice/);
   assert.match(serverPrint, /item\.exchangeRate \?\? saleRate/);
   assert.match(serverPrint, /dualSaleTotal\(receiptData\)/);

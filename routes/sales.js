@@ -87,6 +87,9 @@ function safeSaleResponse(sale, receiptToken) {
     if (value.receiptVerification.exitVerification) {
       delete value.receiptVerification.exitVerification.verifiedBy;
     }
+    if (value.receiptVerification.manualOverride) {
+      delete value.receiptVerification.manualOverride.overriddenBy;
+    }
   }
   return receiptToken ? { ...value, receiptToken } : value;
 }
@@ -565,6 +568,7 @@ router.get("/", authMiddleware, async (req, res) => {
                 "receiptVerification.tokenHash": 0,
                 "receiptVerification.tokenCiphertext": 0,
                 "receiptVerification.invalidatedTokenHashes": 0,
+                "receiptVerification.manualOverride.overriddenBy": 0,
                 receiptApprovedByUser: 0,
                 receiptVerifiedByUser: 0,
               },
@@ -1133,6 +1137,7 @@ router.get("/reservations/all", authMiddleware, async (req, res) => {
                 "receiptVerification.tokenCiphertext": 0,
                 "receiptVerification.invalidatedTokenHashes": 0,
                 "receiptVerification.approvedBy": 0,
+                "receiptVerification.manualOverride.overriddenBy": 0,
               },
             },
           ],
@@ -1366,6 +1371,135 @@ router.get(
     console.error("Receipt token retrieval error:", error);
     return res.status(500).json({ message: "Failed to retrieve receipt token" });
   }
+  }
+);
+
+const ADMIN_OVERRIDE_MAX_IDS = 200;
+
+/** ---------- ADMIN-ONLY MANUAL RECEIPT OVERRIDE (scanner unavailable / data correction) ---------- **/
+router.post(
+  "/receipt-control/admin-mark-complete",
+  authMiddleware,
+  requireReceiptRole(["admin"]),
+  async (req, res) => {
+    try {
+      const rawIds = Array.isArray(req.body?.saleIds) ? req.body.saleIds : [];
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 200) : null;
+      const uniqueIds = [...new Set(rawIds.map((id) => String(id)))];
+
+      if (uniqueIds.length === 0) {
+        return res.status(400).json({ error: "saleIds must be a non-empty array" });
+      }
+      if (uniqueIds.length > ADMIN_OVERRIDE_MAX_IDS) {
+        return res.status(400).json({ error: `Cannot override more than ${ADMIN_OVERRIDE_MAX_IDS} sales at once` });
+      }
+
+      const validIds = uniqueIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+      const rejected = uniqueIds
+        .filter((id) => !mongoose.Types.ObjectId.isValid(id))
+        .map((saleId) => ({ saleId, reason: "invalid_id" }));
+
+      const sales = await Sale.find({ _id: { $in: validIds } })
+        .select("_id type status createdAt receiptVerification");
+
+      const foundIds = new Set(sales.map((sale) => String(sale._id)));
+      for (const id of validIds) {
+        if (!foundIds.has(id)) rejected.push({ saleId: id, reason: "not_found" });
+      }
+
+      let alreadyComplete = 0;
+      const bulkOps = [];
+      const now = new Date();
+      const overrideReason = reason || "Admin bulk override (SalesHistory)";
+
+      for (const sale of sales) {
+        const saleId = String(sale._id);
+        if (sale.type !== "sale") {
+          rejected.push({ saleId, reason: "not_a_sale" });
+          continue;
+        }
+        if (!["completed", "pending"].includes(sale.status)) {
+          rejected.push({ saleId, reason: "ineligible_status" });
+          continue;
+        }
+        if (!sale.receiptVerification) {
+          rejected.push({ saleId, reason: "no_receipt" });
+          continue;
+        }
+        if (sale.receiptVerification.invalidatedAt) {
+          rejected.push({ saleId, reason: "obsolete_receipt" });
+          continue;
+        }
+        if (new Date(sale.createdAt).getTime() < RECEIPT_SCANNER_CUTOFF) {
+          // Pre-rollout sales are already treated as approved/controlled by every
+          // read path (legacyOr fallback) — nothing to override.
+          alreadyComplete += 1;
+          continue;
+        }
+
+        const needsPaymentApproval = sale.receiptVerification.paymentStatus !== "approved";
+        const needsExitControl = sale.receiptVerification.exitVerification?.verified !== true;
+
+        if (!needsPaymentApproval && !needsExitControl) {
+          alreadyComplete += 1;
+          continue;
+        }
+
+        const filter = {
+          _id: sale._id,
+          type: "sale",
+          status: { $in: ["completed", "pending"] },
+          "receiptVerification.invalidatedAt": null,
+        };
+        const setFields = {
+          "receiptVerification.manualOverride.overridden": true,
+          "receiptVerification.manualOverride.overriddenBy": req.user._id,
+          "receiptVerification.manualOverride.overriddenAt": now,
+          "receiptVerification.manualOverride.reason": overrideReason,
+        };
+        if (needsPaymentApproval) {
+          filter["receiptVerification.paymentStatus"] = { $ne: "approved" };
+          setFields["receiptVerification.paymentStatus"] = "approved";
+          setFields["receiptVerification.approvedBy"] = req.user._id;
+          setFields["receiptVerification.approvedAt"] = now;
+        }
+        if (needsExitControl) {
+          filter["receiptVerification.exitVerification.verified"] = { $ne: true };
+          setFields["receiptVerification.exitVerification.verified"] = true;
+          setFields["receiptVerification.exitVerification.verifiedBy"] = req.user._id;
+          setFields["receiptVerification.exitVerification.verifiedAt"] = now;
+        }
+
+        bulkOps.push({ updateOne: { filter, update: { $set: setFields } } });
+      }
+
+      let modifiedCount = 0;
+      if (bulkOps.length > 0) {
+        const bulkResult = await Sale.bulkWrite(bulkOps, { ordered: false });
+        modifiedCount = bulkResult.modifiedCount || 0;
+        // Any op whose filter no longer matched (concurrent scan/edit in between
+        // our read and this write) is neither silently "updated" nor lost —
+        // it is surfaced as rejected so the response never overstates success.
+        if (modifiedCount < bulkOps.length) {
+          rejected.push({
+            saleId: null,
+            reason: "concurrent_state_change",
+            count: bulkOps.length - modifiedCount,
+          });
+        }
+      }
+
+      return res.json({
+        selected: uniqueIds.length,
+        updated: modifiedCount,
+        alreadyComplete,
+        rejected: rejected.length,
+        rejectedDetails: rejected,
+      });
+    } catch (error) {
+      console.error("Admin receipt override error:", error);
+      return res.status(500).json({ error: "Échec de la mise à jour manuelle des reçus" });
+    }
   }
 );
 
