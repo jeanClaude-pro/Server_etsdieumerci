@@ -179,7 +179,13 @@ router.post('/receipt', async (req, res) => {
             .align('ct')
             .qrcode(receiptData.qrToken, 6, 'M', 6)
             .feed(1)
-            .text('SCAN CONTROLE PAIEMENT')
+            .style('b')
+            .text('UN SYSTÈME POUR VOTRE BOUTIQUE OU ENTREPRISE ?')
+            .style('normal')
+            .text('Gestion, ventes, stock & bien plus')
+            .style('b')
+            .text('WhatsApp : +243 844 311 550')
+            .style('normal')
             .align('lt');
         }
 
@@ -289,7 +295,13 @@ router.post('/stub', async (req, res) => {
             .align('ct')
             .qrcode(receiptData.qrToken, 6, 'M', 6)
             .feed(1)
-            .text('SCAN CONTROLE PAIEMENT')
+            .style('b')
+            .text('UN SYSTÈME POUR VOTRE BOUTIQUE OU ENTREPRISE ?')
+            .style('normal')
+            .text('Gestion, ventes, stock & bien plus')
+            .style('b')
+            .text('WhatsApp : +243 844 311 550')
+            .style('normal')
             .align('lt');
         }
 
