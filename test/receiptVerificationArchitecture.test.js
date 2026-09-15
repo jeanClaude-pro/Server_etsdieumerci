@@ -122,6 +122,7 @@ test("normal sale aggregations and direct responses remove security internals", 
 test("raw-token retrieval is permission protected and rate limited", () => {
   const tokenRoute = salesRoutes.slice(salesRoutes.indexOf('"/:id/receipt-token"'));
   assert.match(tokenRoute, /authMiddleware,[\s\S]*?receiptTokenLimiter,[\s\S]*?requireReceiptReprintPermission/);
+  assert.match(salesRoutes, /\["admin", "manager", "inventory_manager", "cashier_supervisor", "staff"\]/);
   assert.match(salesRoutes, /actionPermissions\?\.includes\("reprint_receipts"\)/);
 });
 

@@ -14,6 +14,14 @@ const routeStart = salesRoutes.indexOf('"/receipt-control/admin-mark-complete"')
 const routeEnd = salesRoutes.indexOf('router.get("/:id"', routeStart);
 const overrideRoute = salesRoutes.slice(routeStart, routeEnd);
 
+test("every authenticated role can reprint without receiving sale mutation rights", () => {
+  assert.match(salesRoutes, /authenticatedRoles = \["admin", "manager", "inventory_manager", "cashier_supervisor", "staff"\]/);
+  assert.match(salesHistoryPage, /const canReprint = Boolean\(currentUser\)/);
+  assert.match(salesHistoryPage, /canReprint &&[\s\S]*?generateReceiptPDF/);
+  assert.match(salesHistoryPage, /canReprint &&[\s\S]*?printESC_POSReceipt/);
+  assert.doesNotMatch(salesRoutes.slice(salesRoutes.indexOf("function requireReceiptReprintPermission"), salesRoutes.indexOf("function receiptResult")), /canValidate|canEdit|canVoid|admin-mark-complete/);
+});
+
 test("admin override route exists and is scoped to admin only", () => {
   assert.ok(routeStart > -1, "admin-mark-complete route not found");
   assert.match(overrideRoute, /authMiddleware/);

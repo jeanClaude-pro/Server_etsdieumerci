@@ -52,7 +52,8 @@ function receiptPayloadGuard(req, res, next) {
 }
 
 function requireReceiptReprintPermission(req, res, next) {
-  const allowed = req.user.role === "admin" ||
+  const authenticatedRoles = ["admin", "manager", "inventory_manager", "cashier_supervisor", "staff"];
+  const allowed = authenticatedRoles.includes(req.user.role) ||
     req.user.actionPermissions?.includes("reprint_receipts");
   if (!allowed) {
     return res.status(403).json({ message: "Access denied" });
