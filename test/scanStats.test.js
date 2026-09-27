@@ -66,7 +66,6 @@ test("all receipt paths render compact USD and exact historical FC snapshots", (
   const serverPrint = fs.readFileSync(path.join(__dirname, "../routes/print.js"), "utf8");
   const newSale = fs.readFileSync(path.join(__dirname, "../../jean-client/src/pages/NewSale.tsx"), "utf8");
   const history = fs.readFileSync(path.join(__dirname, "../../jean-client/src/pages/history/SalesHistory.tsx"), "utf8");
-  const reservation = fs.readFileSync(path.join(__dirname, "../../jean-client/src/pages/Reservation.tsx"), "utf8");
   assert.match(serverPrint, /enteredCurrency === 'FC'.*enteredPrice/);
   assert.match(serverPrint, /item\.exchangeRate \?\? saleRate/);
   assert.match(serverPrint, /dualSaleTotal\(receiptData\)/);
@@ -74,6 +73,4 @@ test("all receipt paths render compact USD and exact historical FC snapshots", (
   assert.match(newSale, /compactDualSaleTotal\(receiptData\.total, receiptData\.items, receiptData\.exchangeRate\)/);
   assert.match(history, /compactDualUnit\(item, sale\.exchangeRate\)/);
   assert.match(history, /compactDualSaleTotal\(sale\.total, sale\.items, sale\.exchangeRate\)/);
-  assert.match(reservation, /compactReservationUnit\(item, receiptData\.exchangeRate\)/);
-  assert.match(reservation, /compactReservationTotal\(receiptData\.total, receiptData\.items, receiptData\.exchangeRate\)/);
 });

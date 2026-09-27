@@ -17,6 +17,7 @@ const {
   parsePagination,
 } = require("../utils/queryHelpers");
 const { buildStockAdjustments } = require("../utils/stockCalculations");
+const { buildWalkInCustomer } = require("../utils/walkInCustomer");
 const { buildScanStatsPipeline, RECEIPT_SCANNER_CUTOFF } = require("../utils/scanStats");
 const {
   createReceiptToken,
@@ -131,6 +132,32 @@ function receiptMaterialSnapshot(sale) {
   });
 }
 
+function editableSaleSnapshot(sale) {
+  return {
+    customer: sale.customer || null,
+    customerId: sale.customerId || null,
+    isWalkIn: Boolean(sale.isWalkIn),
+    items: (sale.items || []).map((item) => ({
+      productId: item.productId,
+      name: item.name,
+      quantity: Number(item.quantity),
+      price: Number(item.price),
+      enteredPrice: item.enteredPrice == null ? null : Number(item.enteredPrice),
+      enteredCurrency: item.enteredCurrency || null,
+      priceUSD: item.priceUSD == null ? null : Number(item.priceUSD),
+      priceFC: item.priceFC == null ? null : Number(item.priceFC),
+      exchangeRate: item.exchangeRate == null ? null : Number(item.exchangeRate),
+      total: Number(item.total),
+    })),
+    subtotal: Number(sale.subtotal),
+    total: Number(sale.total),
+    exchangeRate: sale.exchangeRate == null ? null : Number(sale.exchangeRate),
+    paymentMethod: sale.paymentMethod,
+    type: sale.type,
+    notes: sale.notes || "",
+  };
+}
+
 // normalize to the Sale model enum
 function normalizePaymentMethod(pm) {
   const v = String(pm || "cash").toLowerCase();
@@ -200,7 +227,7 @@ async function recalculateCustomerStats(customerId, session = null) {
     // FIX: Only include completed sales (exclude voided and corrected)
     const sales = await Sale.find({
       customerId,
-      type: { $in: ["sale", "reservation"] },
+      type: "sale",
       status: { $in: ["completed", "pending", null] }
     })
     .sort({ createdAt: 1 })
@@ -498,7 +525,7 @@ router.get("/", authMiddleware, async (req, res) => {
       filter.type = type;
     } else {
       // Default: include all types
-      filter.type = { $in: ["sale", "reservation", "expense"] };
+      filter.type = { $in: ["sale", "expense"] };
     }
 
     const postRollout = { createdAt: { $gte: RECEIPT_SCANNER_CUTOFF } };
@@ -666,7 +693,7 @@ router.get("/", authMiddleware, async (req, res) => {
         paymentMethod: paymentMethod || 'none',
         search: search || 'none',
         status: status || 'default history statuses',
-        type: type || 'default (sale, reservation, expense)',
+        type: type || 'default (sale, expense)',
         controlStatus: controlStatus || 'all'
       },
       // Performance warning for large datasets
@@ -820,6 +847,10 @@ router.post("/", authMiddleware, async (req, res) => {
       recordedBy
     } = req.body;
 
+    if (type === "reservation") {
+      return res.status(410).json({ error: "Le module Réservation a été supprimé" });
+    }
+
     const normalizedPM = normalizePaymentMethod(paymentMethod);
 
     // 🔹 HANDLE EXPENSE TYPE
@@ -948,16 +979,17 @@ router.post("/", authMiddleware, async (req, res) => {
 
     const saleNumber = `SN-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
+    // Walk-in: optional display name only — no phone and no Customer record.
     const customerData = walkIn
-      ? { name: "Client de passage", phone: "", email: "" }
+      ? buildWalkInCustomer(customer)
       : {
           name: customer.name,
           phone: String(customer.phone || "").trim(),
           email: customer.email || "",
         };
 
-    const effectiveSaleType = type || "sale";
-    const receiptToken = effectiveSaleType === "sale" ? createReceiptToken() : null;
+    const effectiveSaleType = "sale";
+    const receiptToken = createReceiptToken();
 
     // UPDATED: Include type and reservation fields WITH CORRECT STATUS
     const saleData = {
@@ -971,11 +1003,9 @@ router.post("/", authMiddleware, async (req, res) => {
       total,
       exchangeRate: transactionExchangeRate,
       paymentMethod: normalizedPM,
-      status: type === "reservation" ? "pending" : "completed", // ✅ FIXED: Reservations as pending (money received)
+      status: "completed",
       salesPerson: salesPerson || "Admin",
       type: effectiveSaleType,
-      reservationDate: reservationDate || null,
-      reservationTime: reservationTime || null,
       notes: notes || "",
       ...(receiptToken
         ? {
@@ -1090,6 +1120,8 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
 
 /** ---------- GET RESERVATIONS (TIME FRAME BASED) ---------- **/
 router.get("/reservations/all", authMiddleware, async (req, res) => {
+  return res.status(410).json({ error: "Le module Réservation a été supprimé" });
+  /* istanbul ignore next -- retained below only to document legacy data shape */
   try {
     const { 
       status,
@@ -1237,6 +1269,7 @@ router.post(
           "receiptVerification.version": { $gte: 1 },
           "receiptVerification.paymentStatus": "pending",
           "receiptVerification.invalidatedAt": null,
+          "saleEditApproval.status": { $ne: "pending" },
         },
         {
           $set: {
@@ -1265,6 +1298,9 @@ router.post(
 
       if (!existing) {
         return res.status(404).json({ code: "NOT_FOUND", message: "REÇU INTROUVABLE" });
+      }
+      if (existing.saleEditApproval?.status === "pending") {
+        return res.status(409).json({ code: "EDIT_PENDING", message: "MODIFICATION EN ATTENTE D'APPROBATION" });
       }
       if (existing.receiptVerification?.invalidatedTokenHashes?.includes(tokenHash)) {
         return res.status(410).json({ code: "OBSOLETE", message: "REÇU OBSOLÈTE / INVALIDE" });
@@ -1307,6 +1343,7 @@ router.post(
         "receiptVerification.paymentStatus": "approved",
         "receiptVerification.invalidatedAt": null,
         "receiptVerification.exitVerification.verified": { $ne: true },
+        "saleEditApproval.status": { $ne: "pending" },
       }, {
         $set: {
           "receiptVerification.exitVerification.verified": true,
@@ -1334,6 +1371,9 @@ router.post(
 
       if (!sale) {
         return res.status(404).json({ code: "NOT_FOUND", message: "REÇU INTROUVABLE" });
+      }
+      if (sale.saleEditApproval?.status === "pending") {
+        return res.status(409).json({ code: "EDIT_PENDING", message: "MODIFICATION EN ATTENTE D'APPROBATION" });
       }
       if (sale.receiptVerification?.invalidatedTokenHashes?.includes(tokenHash)) {
         return res.status(410).json({ code: "OBSOLETE", message: "REÇU OBSOLÈTE / INVALIDE" });
@@ -1367,7 +1407,7 @@ router.get(
     const sale = await Sale.findById(req.params.id)
       .select(
         "type status receiptVerification.version receiptVerification.paymentStatus " +
-        "receiptVerification.invalidatedAt +receiptVerification.tokenCiphertext"
+        "receiptVerification.invalidatedAt saleEditApproval.status +receiptVerification.tokenCiphertext"
       )
       .lean();
     if (!sale || sale.type !== "sale") {
@@ -1375,6 +1415,9 @@ router.get(
     }
     if (["voided", "corrected"].includes(sale.status) || sale.receiptVerification?.invalidatedAt) {
       return res.status(410).json({ message: "Receipt is no longer valid" });
+    }
+    if (sale.saleEditApproval?.status === "pending") {
+      return res.status(409).json({ message: "Modification en attente d'approbation administrateur" });
     }
     if (!sale.receiptVerification?.tokenCiphertext) {
       return res.status(404).json({ message: "This legacy receipt has no QR token" });
@@ -1416,7 +1459,7 @@ router.post(
         .map((saleId) => ({ saleId, reason: "invalid_id" }));
 
       const sales = await Sale.find({ _id: { $in: validIds } })
-        .select("_id type status createdAt receiptVerification");
+        .select("_id type status createdAt receiptVerification saleEditApproval.status");
 
       const foundIds = new Set(sales.map((sale) => String(sale._id)));
       for (const id of validIds) {
@@ -1430,6 +1473,10 @@ router.post(
 
       for (const sale of sales) {
         const saleId = String(sale._id);
+        if (sale.saleEditApproval?.status === "pending") {
+          rejected.push({ saleId, reason: "edit_pending_approval" });
+          continue;
+        }
         if (sale.type !== "sale") {
           rejected.push({ saleId, reason: "not_a_sale" });
           continue;
@@ -1466,6 +1513,7 @@ router.post(
           type: "sale",
           status: { $in: ["completed", "pending"] },
           "receiptVerification.invalidatedAt": null,
+          "saleEditApproval.status": { $ne: "pending" },
         };
         const setFields = {
           "receiptVerification.manualOverride.overridden": true,
@@ -1515,6 +1563,174 @@ router.post(
     } catch (error) {
       console.error("Admin receipt override error:", error);
       return res.status(500).json({ error: "Échec de la mise à jour manuelle des reçus" });
+    }
+  }
+);
+
+/** ---------- ADMIN SALE-EDIT APPROVAL QUEUE ---------- **/
+router.get(
+  "/edit-approvals/pending",
+  authMiddleware,
+  requireReceiptRole(["admin"]),
+  async (_req, res) => {
+    try {
+      const sales = await Sale.find({ "saleEditApproval.status": "pending" })
+        .select("saleId saleNumber status type saleEditApproval createdAt updatedAt")
+        .sort({ "saleEditApproval.requestedAt": 1 })
+        .lean();
+      return res.json({ success: true, data: sales });
+    } catch (error) {
+      console.error("Edit approval queue error:", error);
+      return res.status(500).json({ error: "Impossible de charger les modifications en attente" });
+    }
+  }
+);
+
+router.post(
+  "/edit-approvals/:id/decision",
+  authMiddleware,
+  requireReceiptRole(["admin"]),
+  async (req, res) => {
+    try {
+      const decision = String(req.body?.decision || "").toLowerCase();
+      const reviewNote = String(req.body?.note || "").trim().slice(0, 500);
+      if (!["approved", "rejected"].includes(decision)) {
+        return res.status(400).json({ error: "La décision doit être approved ou rejected" });
+      }
+
+      if (decision === "rejected") {
+        const current = await Sale.findOne({
+          _id: req.params.id,
+          "saleEditApproval.status": "pending",
+        }).lean();
+        if (!current) return res.status(409).json({ error: "Cette demande n'est plus en attente" });
+        const reviewed = {
+          ...current.saleEditApproval,
+          status: "rejected",
+          reviewedBy: req.user._id,
+          reviewedByName: req.user.username,
+          reviewedAt: new Date(),
+          reviewNote,
+        };
+        const rejected = await Sale.findOneAndUpdate(
+          { _id: current._id, "saleEditApproval._id": current.saleEditApproval._id, "saleEditApproval.status": "pending" },
+          { $set: { saleEditApproval: reviewed }, $push: { saleEditApprovalHistory: reviewed } },
+          { new: true, runValidators: true }
+        );
+        if (!rejected) return res.status(409).json({ error: "La demande a déjà été traitée" });
+        return res.json({ success: true, message: "Modification rejetée; la vente originale est conservée", data: rejected });
+      }
+
+      const approvedSale = await runTransaction(async (session) => {
+        const current = await Sale.findOne({
+          _id: req.params.id,
+          "saleEditApproval.status": "pending",
+        })
+          .select("+receiptVerification.tokenHash +receiptVerification.tokenCiphertext +receiptVerification.invalidatedTokenHashes")
+          .session(session)
+          .lean();
+        if (!current) throw new HttpError(409, "Cette demande n'est plus en attente");
+        if (current.type !== "sale" || ["voided", "corrected"].includes(current.status)) {
+          throw new HttpError(409, "Cette vente ne peut plus être modifiée");
+        }
+
+        const proposal = current.saleEditApproval.proposed;
+        const original = current.saleEditApproval.original;
+        const stockAdjustments = buildStockAdjustments(current.items, proposal.items);
+        for (const { productId, adjustment } of stockAdjustments) {
+          const filter = { _id: productId };
+          if (adjustment < 0) filter.stock = { $gte: -adjustment };
+          const product = await Product.findOneAndUpdate(
+            filter,
+            { $inc: { stock: adjustment } },
+            { new: true, session }
+          );
+          if (!product) throw new HttpError(409, "Stock insuffisant; la demande reste en attente");
+        }
+
+        let nextCustomerId = null;
+        if (!proposal.isWalkIn) {
+          const sameCustomer = current.customer?.phone === proposal.customer?.phone;
+          nextCustomerId = sameCustomer && current.customerId
+            ? current.customerId
+            : await findOrCreateCustomerId(proposal.customer, session);
+        }
+
+        const receiptChanged =
+          receiptMaterialSnapshot(current) !== receiptMaterialSnapshot(proposal);
+        let receiptVerification = current.receiptVerification;
+        if (receiptChanged) {
+          const token = createReceiptToken();
+          const previous = current.receiptVerification || {};
+          const invalidated = [
+            ...(previous.invalidatedTokenHashes || []),
+            ...(previous.tokenHash ? [previous.tokenHash] : []),
+          ];
+          receiptVerification = {
+            tokenHash: hashReceiptToken(token),
+            tokenCiphertext: encryptReceiptToken(token),
+            version: Number(previous.version || 0) + 1,
+            paymentStatus: "pending",
+            approvedBy: null,
+            approvedAt: null,
+            exitVerification: { verified: false, verifiedBy: null, verifiedAt: null },
+            manualOverride: { overridden: false },
+            invalidatedAt: null,
+            invalidationReason: null,
+            invalidatedTokenHashes: [...new Set(invalidated)].slice(-20),
+          };
+        }
+
+        const reviewed = {
+          ...current.saleEditApproval,
+          status: "approved",
+          reviewedBy: req.user._id,
+          reviewedByName: req.user.username,
+          reviewedAt: new Date(),
+          reviewNote,
+        };
+        const changeRecord = {
+          editedBy: current.saleEditApproval.requestedByName,
+          editedAt: current.saleEditApproval.requestedAt,
+          changes: { original, proposed: { ...proposal, customerId: nextCustomerId } },
+          reason: current.saleEditApproval.reason,
+        };
+        const saved = await Sale.findOneAndUpdate(
+          { _id: current._id, "saleEditApproval._id": current.saleEditApproval._id, "saleEditApproval.status": "pending" },
+          {
+            $set: {
+              customer: proposal.customer,
+              customerId: nextCustomerId,
+              isWalkIn: proposal.isWalkIn,
+              items: proposal.items,
+              subtotal: proposal.subtotal,
+              total: proposal.total,
+              exchangeRate: proposal.exchangeRate,
+              paymentMethod: proposal.paymentMethod,
+              type: proposal.type,
+              notes: proposal.notes || "",
+              editedBy: current.saleEditApproval.requestedByName,
+              editedAt: current.saleEditApproval.requestedAt,
+              receiptVerification,
+              saleEditApproval: reviewed,
+            },
+            $push: { editHistory: changeRecord, saleEditApprovalHistory: reviewed },
+          },
+          { new: true, runValidators: true, session }
+        );
+        if (!saved) throw new HttpError(409, "La demande a déjà été traitée");
+
+        const oldCustomerId = current.customerId ? String(current.customerId) : null;
+        const newCustomerId = nextCustomerId ? String(nextCustomerId) : null;
+        if (oldCustomerId && oldCustomerId !== newCustomerId) await recalculateCustomerStats(oldCustomerId, session);
+        if (newCustomerId) await recalculateCustomerStats(newCustomerId, session);
+        return saved;
+      });
+      return res.json({ success: true, message: "Modification approuvée et appliquée", data: safeSaleResponse(approvedSale) });
+    } catch (error) {
+      console.error("Edit approval decision error:", error);
+      if (error.name === "CastError") return res.status(400).json({ error: "Identifiant de vente invalide" });
+      return sendMutationError(res, error, "Échec du traitement de la modification");
     }
   }
 );
@@ -1595,8 +1811,13 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Sale not found" });
     }
 
+    if (type === "reservation") {
+      return res.status(410).json({ error: "Le module Réservation a été supprimé" });
+    }
+
     // 🔹 NEW: RESTRICTION FOR RESERVATIONS
     if (originalSale.type === "reservation") {
+      return res.status(410).json({ error: "Le module Réservation a été supprimé" });
       const userRole = req.user.role;
       
       // If reservation is completed, only admin can edit
@@ -1620,6 +1841,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return res.status(400).json({ 
         error: "Cannot edit a voided or corrected sale" 
       });
+    }
+
+    if (originalSale.saleEditApproval?.status === "pending") {
+      return res.status(409).json({ error: "Une modification est déjà en attente d'approbation" });
     }
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
@@ -1712,7 +1937,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     }
 
     const customerData = walkIn
-      ? { name: "Client de passage", phone: "", email: "" }
+      ? buildWalkInCustomer(customer)
       : { name: customer.name, phone: String(customer.phone || "").trim(), email: customer.email || "" };
 
     // Resolve which customer record (if any) this sale should be linked to:
@@ -1776,6 +2001,52 @@ router.put("/:id", authMiddleware, async (req, res) => {
     // Track type changes
     if (originalSale.type !== effectiveType) {
       changes.set('type', { from: originalSale.type, to: effectiveType });
+    }
+
+    // A manager proposes an edit; authoritative values, stock, receipt state,
+    // customer statistics and analytics remain untouched until admin approval.
+    if (req.user.role === "manager" && originalSale.type === "sale") {
+      const editReason = String(reason || "").trim();
+      if (!editReason) {
+        return res.status(400).json({ error: "La raison de la modification est obligatoire" });
+      }
+      const approval = {
+        status: "pending",
+        requestedBy: req.user._id,
+        requestedByName: req.user.username,
+        requestedAt: new Date(),
+        reason: editReason,
+        original: editableSaleSnapshot(originalSale),
+        proposed: {
+          customer: customerData,
+          customerId: originalSale.customerId || null,
+          isWalkIn: walkIn,
+          items: enrichedItems,
+          subtotal,
+          total,
+          exchangeRate: transactionExchangeRate,
+          paymentMethod: normalizedPM,
+          type: effectiveType,
+          notes: notes ?? originalSale.notes ?? "",
+        },
+      };
+      const queuedSale = await Sale.findOneAndUpdate(
+        {
+          _id: id,
+          status: { $nin: ["voided", "corrected"] },
+          "saleEditApproval.status": { $ne: "pending" },
+        },
+        { $set: { saleEditApproval: approval } },
+        { new: true, runValidators: true }
+      );
+      if (!queuedSale) {
+        return res.status(409).json({ error: "La vente a changé; actualisez puis réessayez" });
+      }
+      return res.status(202).json({
+        success: true,
+        message: "Modification enregistrée — en attente d'approbation administrateur",
+        sale: safeSaleResponse(queuedSale),
+      });
     }
 
     const updatedSale = await runTransaction(async (session) => {
@@ -1875,8 +2146,6 @@ router.put("/:id", authMiddleware, async (req, res) => {
           exchangeRate: transactionExchangeRate,
           paymentMethod: normalizedPM,
           type: effectiveType,
-          reservationDate: reservationDate || originalSale.reservationDate,
-          reservationTime: reservationTime || originalSale.reservationTime,
           notes: notes || originalSale.notes,
           editedBy: req.user.username,
           editedAt: new Date(),
@@ -1920,6 +2189,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
 /** ---------- MARK RESERVATION AS COMPLETED ---------- **/
 router.patch("/:id/complete", authMiddleware, async (req, res) => {
+  return res.status(410).json({ error: "Le module Réservation a été supprimé" });
+  /* istanbul ignore next -- legacy endpoint intentionally disabled */
   try {
     const { id } = req.params;
     const { completedBy } = req.body;
@@ -1961,6 +2232,8 @@ router.patch("/:id/complete", authMiddleware, async (req, res) => {
 
 /** ---------- MARK RESERVATION AS PENDING ---------- **/
 router.patch("/:id/pending", authMiddleware, async (req, res) => {
+  return res.status(410).json({ error: "Le module Réservation a été supprimé" });
+  /* istanbul ignore next -- legacy endpoint intentionally disabled */
   try {
     const { id } = req.params;
 
@@ -2022,6 +2295,9 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
 
     if (sale.status === "voided") {
       throw new HttpError(409, "Sale is already voided");
+    }
+    if (sale.saleEditApproval?.status === "pending") {
+      throw new HttpError(409, "Modification en attente d'approbation administrateur");
     }
 
     // Return stock to inventory (only for sales and reservations with items)

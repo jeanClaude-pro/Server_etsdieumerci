@@ -16,9 +16,10 @@ const overrideRoute = salesRoutes.slice(routeStart, routeEnd);
 
 test("every authenticated role can reprint without receiving sale mutation rights", () => {
   assert.match(salesRoutes, /authenticatedRoles = \["admin", "manager", "inventory_manager", "cashier_supervisor", "staff"\]/);
-  assert.match(salesHistoryPage, /const canReprint = Boolean\(currentUser\)/);
-  assert.match(salesHistoryPage, /canReprint &&[\s\S]*?generateReceiptPDF/);
-  assert.match(salesHistoryPage, /canReprint &&[\s\S]*?printESC_POSReceipt/);
+  assert.match(salesHistoryPage, /const canReprintSale = \(sale: Sale\) => Boolean\(currentUser\)/);
+  assert.match(salesHistoryPage, /sale\.saleEditApproval\?\.status !== "pending"/);
+  assert.match(salesHistoryPage, /canReprintSale\(sale\) &&[\s\S]*?generateReceiptPDF/);
+  assert.match(salesHistoryPage, /canReprintSale\(sale\) &&[\s\S]*?printESC_POSReceipt/);
   assert.doesNotMatch(salesRoutes.slice(salesRoutes.indexOf("function requireReceiptReprintPermission"), salesRoutes.indexOf("function receiptResult")), /canValidate|canEdit|canVoid|admin-mark-complete/);
 });
 

@@ -19,7 +19,7 @@ const router = express.Router();
 router.use(authMiddleware);
 
 const VALID_SALE_MATCH = {
-  type: { $in: ["sale", "reservation"] },
+  type: "sale",
   status: { $in: ["completed", "pending"] },
 };
 

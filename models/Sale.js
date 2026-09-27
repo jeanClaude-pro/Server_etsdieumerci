@@ -118,6 +118,29 @@ const saleItemSchema = new mongoose.Schema({
   },
 });
 
+const saleEditApprovalSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      required: true,
+    },
+    requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    requestedByName: { type: String, required: true },
+    requestedAt: { type: Date, required: true, default: Date.now },
+    reason: { type: String, required: true },
+    // Immutable audit snapshots. Mixed is intentional: these are historical
+    // representations, not a second authoritative Sale document.
+    original: { type: mongoose.Schema.Types.Mixed, required: true },
+    proposed: { type: mongoose.Schema.Types.Mixed, required: true },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    reviewedByName: { type: String, default: null },
+    reviewedAt: { type: Date, default: null },
+    reviewNote: { type: String, default: "" },
+  },
+  { _id: true }
+);
+
 const saleSchema = new mongoose.Schema({
   saleId: {
     type: String,
@@ -193,7 +216,7 @@ const saleSchema = new mongoose.Schema({
   // --- UPDATED TYPE ENUM ---
   type: {
     type: String,
-    enum: ["sale", "reservation", "expense"], // 🔹 Added "expense"
+    enum: ["sale", "expense"],
     default: "sale"
   },
   // --- NEW EXPENSE FIELDS ---
@@ -211,15 +234,6 @@ const saleSchema = new mongoose.Schema({
     type: String,
     required: false, // Will be required for expenses
     trim: true
-  },
-  // --- EXISTING RESERVATION FIELDS ---
-  reservationDate: {
-    type: String,
-    default: null
-  },
-  reservationTime: {
-    type: String,
-    default: null
   },
   notes: {
     type: String,
@@ -276,6 +290,14 @@ const saleSchema = new mongoose.Schema({
     },
     reason: String
   }],
+  saleEditApproval: {
+    type: saleEditApprovalSchema,
+    default: undefined
+  },
+  saleEditApprovalHistory: {
+    type: [saleEditApprovalSchema],
+    default: []
+  },
   receiptVerification: {
     type: receiptVerificationSchema,
     default: undefined
@@ -295,6 +317,7 @@ saleSchema.index({ paymentMethod: 1, createdAt: -1 });
 saleSchema.index({ customerId: 1, createdAt: -1 });
 saleSchema.index({ "receiptVerification.tokenHash": 1 }, { sparse: true, unique: true });
 saleSchema.index({ "receiptVerification.invalidatedTokenHashes": 1 }, { sparse: true });
+saleSchema.index({ "saleEditApproval.status": 1, "saleEditApproval.requestedAt": -1 });
 
 // Pre-save middleware to calculate item totals (only for sales with items)
 saleSchema.pre("save", function(next) {

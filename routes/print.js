@@ -54,6 +54,7 @@ async function authorizePrintedReceipt(receiptData) {
     type: 'sale',
     status: { $nin: ['voided', 'corrected'] },
     'receiptVerification.invalidatedAt': null,
+    'saleEditApproval.status': { $ne: 'pending' },
   })
     .select('+receiptVerification.tokenCiphertext')
     .lean();
@@ -89,6 +90,7 @@ function getPrinter() {
 router.post('/receipt', async (req, res) => {
   try {
     const { receiptData, type = 'sale' } = req.body;
+    if (type !== 'sale') return res.status(410).json({ error: 'Le module Réservation a été supprimé' });
     if (type === 'sale') receiptData.qrToken = await authorizePrintedReceipt(receiptData);
     
     const printer = getPrinter();
@@ -228,6 +230,7 @@ router.post('/receipt', async (req, res) => {
 router.post('/stub', async (req, res) => {
   try {
     const { receiptData, type = 'sale' } = req.body;
+    if (type !== 'sale') return res.status(410).json({ error: 'Le module Réservation a été supprimé' });
     if (type === 'sale') receiptData.qrToken = await authorizePrintedReceipt(receiptData);
     
     const printer = getPrinter();
