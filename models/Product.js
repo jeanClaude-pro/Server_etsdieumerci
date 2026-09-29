@@ -46,10 +46,24 @@ const productSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // Manual catalogue status set by an administrator. It is never changed
+    // automatically: a product is sellable only when it is "active" AND has
+    // stock > 0 (see utils/productAvailability.js), so a sold-out product is
+    // unavailable without losing the administrator's own decision.
     status: {
       type: String,
       enum: ["active", "inactive"],
       default: "active",
+    },
+    // Time of the last actual quantity change (updatedAt also moves when the
+    // name, price, category… are edited). Maintained by utils/stockLedger.js.
+    lastStockUpdatedAt: {
+      type: Date,
+    },
+    // When the stock ledger started covering this product. Absent on products
+    // created before the ledger existed until their baseline is recorded.
+    stockTrackedSince: {
+      type: Date,
     },
   },
   {

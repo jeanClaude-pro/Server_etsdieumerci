@@ -16,7 +16,8 @@ const {
   paginationMetadata,
   parsePagination,
 } = require("../utils/queryHelpers");
-const { buildStockAdjustments } = require("../utils/stockCalculations");
+const { buildStockAdjustments, totalByProduct } = require("../utils/stockCalculations");
+const { StockChangeError, applyStockChange } = require("../utils/stockLedger");
 const { buildWalkInCustomer } = require("../utils/walkInCustomer");
 const { buildScanStatsPipeline, RECEIPT_SCANNER_CUTOFF } = require("../utils/scanStats");
 const {
@@ -290,6 +291,36 @@ async function runTransaction(work) {
   } finally {
     await session.endSession();
   }
+}
+
+// Every sale-driven stock change goes through the ledger helper (atomic
+// conditional $inc + movement in the same transaction); this maps its refusal
+// to the HTTP error the calling route already used.
+async function applySaleStockChange({ productId, quantity, type, session, sale, user, name, insufficientMessage }) {
+  try {
+    return await applyStockChange({
+      productId,
+      quantity,
+      type,
+      session,
+      sale,
+      user,
+      // Only consuming stock requires a sellable product; returns never do.
+      requireActive: quantity < 0,
+    });
+  } catch (error) {
+    if (!(error instanceof StockChangeError)) throw error;
+    const label = name || error.product?.name || String(productId);
+    if (error.code === "NOT_FOUND") throw new HttpError(409, `Produit introuvable: ${label}`);
+    if (error.code === "INACTIVE") {
+      throw new HttpError(409, `${label} n'est plus disponible à la vente. Actualisez les produits puis réessayez.`);
+    }
+    throw new HttpError(409, insufficientMessage);
+  }
+}
+
+function saleItemNames(items = []) {
+  return new Map(items.map((item) => [String(item.productId), item.name]));
 }
 
 function sendMutationError(res, error, fallbackMessage) {
@@ -944,6 +975,14 @@ router.post("/", authMiddleware, async (req, res) => {
           .status(400)
           .json({ error: `Product not found: ${productId}` });
 
+      // A deactivated product cannot be sold, whatever its stock. The
+      // transaction below re-checks both conditions atomically.
+      if (product.status !== "active") {
+        return res.status(400).json({
+          error: `${product.name || name || productId} n'est pas disponible à la vente (article inactif).`,
+        });
+      }
+
       if (typeof product.stock !== "number" || product.stock < quantity) {
         return res.status(400).json({
           error: `Insufficient stock for ${
@@ -1020,24 +1059,31 @@ router.post("/", authMiddleware, async (req, res) => {
         : {})
     };
 
+    // Known before the transaction so each stock movement can reference it.
+    saleData._id = new mongoose.Types.ObjectId();
+    const itemNames = saleItemNames(enrichedItems);
+
     const savedSale = await runTransaction(async (session) => {
       // Walk-in sales never create or update a Customer record.
       saleData.customerId = walkIn
         ? null
         : await updateCustomerData(customer, total, session);
 
-      for (const item of enrichedItems) {
-        const updated = await Product.findOneAndUpdate(
-          { _id: item.productId, stock: { $gte: item.quantity } },
-          { $inc: { stock: -item.quantity } },
-          { new: true, session }
-        );
-        if (!updated) {
-          throw new HttpError(
-            409,
-            `Stock insuffisant pour ${item.name}. Actualisez les produits puis réessayez.`
-          );
-        }
+      // One conditional decrement per product (lines of the same product at
+      // different prices are summed): never below zero, never an inactive
+      // product, one ledger movement each.
+      for (const [productId, quantity] of totalByProduct(enrichedItems)) {
+        const name = itemNames.get(productId);
+        await applySaleStockChange({
+          productId,
+          quantity: -quantity,
+          type: "sale",
+          session,
+          sale: saleData,
+          user: req.user,
+          name,
+          insufficientMessage: `Stock insuffisant pour ${name}. Actualisez les produits puis réessayez.`,
+        });
       }
 
       const createdSales = await Sale.create([saleData], { session });
@@ -1637,15 +1683,18 @@ router.post(
         const proposal = current.saleEditApproval.proposed;
         const original = current.saleEditApproval.original;
         const stockAdjustments = buildStockAdjustments(current.items, proposal.items);
+        const itemNames = saleItemNames([...current.items, ...proposal.items]);
         for (const { productId, adjustment } of stockAdjustments) {
-          const filter = { _id: productId };
-          if (adjustment < 0) filter.stock = { $gte: -adjustment };
-          const product = await Product.findOneAndUpdate(
-            filter,
-            { $inc: { stock: adjustment } },
-            { new: true, session }
-          );
-          if (!product) throw new HttpError(409, "Stock insuffisant; la demande reste en attente");
+          await applySaleStockChange({
+            productId,
+            quantity: adjustment,
+            type: "sale_edit",
+            session,
+            sale: current,
+            user: req.user,
+            name: itemNames.get(productId),
+            insufficientMessage: "Stock insuffisant; la demande reste en attente",
+          });
         }
 
         let nextCustomerId = null;
@@ -2118,20 +2167,18 @@ router.put("/:id", authMiddleware, async (req, res) => {
         currentSale.items,
         enrichedItems
       );
+      const itemNames = saleItemNames([...currentSale.items, ...enrichedItems]);
       for (const { productId, adjustment } of stockAdjustments) {
-        const filter = { _id: productId };
-        if (adjustment < 0) filter.stock = { $gte: -adjustment };
-        const updatedProduct = await Product.findOneAndUpdate(
-          filter,
-          { $inc: { stock: adjustment } },
-          { new: true, session }
-        );
-        if (!updatedProduct) {
-          throw new HttpError(
-            409,
-            "Stock insuffisant pour modifier cette vente. Actualisez puis réessayez."
-          );
-        }
+        await applySaleStockChange({
+          productId,
+          quantity: adjustment,
+          type: "sale_edit",
+          session,
+          sale: currentSale,
+          user: req.user,
+          name: itemNames.get(productId),
+          insufficientMessage: "Stock insuffisant pour modifier cette vente. Actualisez puis réessayez.",
+        });
       }
 
       const savedSale = await Sale.findByIdAndUpdate(
@@ -2303,15 +2350,17 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
     // Return stock to inventory (only for sales and reservations with items)
     // ✅ FIXED: Check for reservation type as well
     if ((sale.type === "sale" || sale.type === "reservation") && sale.items && sale.items.length > 0) {
-      for (const item of sale.items) {
-        const restoredProduct = await Product.findByIdAndUpdate(
-          item.productId,
-          { $inc: { stock: item.quantity } },
-          { session }
-        );
-        if (!restoredProduct) {
-          throw new HttpError(409, `Produit introuvable: ${item.name}`);
-        }
+      const itemNames = saleItemNames(sale.items);
+      for (const [productId, quantity] of totalByProduct(sale.items)) {
+        await applySaleStockChange({
+          productId,
+          quantity,
+          type: "sale_void",
+          session,
+          sale,
+          user: req.user,
+          name: itemNames.get(productId),
+        });
       }
     }
 
@@ -2396,24 +2445,21 @@ router.delete("/:id", authMiddleware, async (req, res) => {
         }))
       });
       
-      for (const item of sale.items) {
+      const itemNames = saleItemNames(sale.items);
+      for (const [productId, quantity] of totalByProduct(sale.items)) {
         try {
-          const updatedProduct = await Product.findByIdAndUpdate(
-            item.productId,
-            { $inc: { stock: item.quantity } },
-            { new: true, session }
-          );
-          
-          if (!updatedProduct) {
-            throw new HttpError(409, `Produit introuvable: ${item.name}`);
-          }
-          if (updatedProduct) {
-            console.log(`✅ Returned ${item.quantity} units of "${item.name}", new stock: ${updatedProduct.stock}`);
-          } else {
-            console.warn(`❌ Product not found for ID: ${item.productId}`);
-          }
+          const updatedProduct = await applySaleStockChange({
+            productId,
+            quantity,
+            type: "sale_delete",
+            session,
+            sale,
+            user: req.user,
+            name: itemNames.get(productId),
+          });
+          console.log(`✅ Returned ${quantity} units of "${itemNames.get(productId)}", new stock: ${updatedProduct.stock}`);
         } catch (productError) {
-          console.error(`Error returning stock for product ${item.productId}:`, productError);
+          console.error(`Error returning stock for product ${productId}:`, productError);
           throw productError;
         }
       }

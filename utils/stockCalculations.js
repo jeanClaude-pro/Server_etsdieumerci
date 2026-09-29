@@ -25,4 +25,4 @@ function buildStockAdjustments(previousItems = [], nextItems = []) {
     .filter(({ adjustment }) => adjustment !== 0);
 }
 
-module.exports = { buildStockAdjustments };
+module.exports = { buildStockAdjustments, totalByProduct };

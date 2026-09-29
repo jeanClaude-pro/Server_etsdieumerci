@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
 const Entry = require("../models/Entry");
+const User = require("../models/User");
 const authMiddleware = require("../middleware/auth");
 const { normalizeAmountSnapshot } = require("../utils/salePricing");
 const {
@@ -172,6 +173,17 @@ function normalizePaymentMethod(pm) {
   return "other";
 }
 
+// Keep only the known sender fields as trimmed strings
+function normalizeReceivedFrom(receivedFrom) {
+  const value = receivedFrom && typeof receivedFrom === "object" ? receivedFrom : {};
+  const text = (field) => (typeof field === "string" ? field.trim() : "");
+  return {
+    name: text(value.name),
+    phone: text(value.phone),
+    email: text(value.email),
+  };
+}
+
 // ==================== MAIN ENTRIES ENDPOINT (TIME FRAME PAGINATION) ====================
 
 /** 
@@ -230,16 +242,22 @@ router.get("/", authMiddleware, async (req, res) => {
     
     // 5. Apply createdBy filter if provided
     if (createdBy) {
-      filter.createdBy = createdBy;
+      if (!mongoose.isValidObjectId(createdBy)) return res.status(400).json({ error: "Invalid creator ID" });
+      filter.createdBy = new mongoose.Types.ObjectId(createdBy);
     }
     
     // 6. Apply search filter if provided
     if (search) {
+      const searchText = String(search).trim().slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const creators = await User.find({ username: { $regex: searchText, $options: "i" } }).select("_id").lean();
       filter.$or = [
-        { entryId: { $regex: search, $options: "i" } },
-        { source: { $regex: search, $options: "i" } },
-        { category: { $regex: search, $options: "i" } },
-        { description: { $regex: search, $options: "i" } }
+        { entryId: { $regex: searchText, $options: "i" } },
+        { source: { $regex: searchText, $options: "i" } },
+        { category: { $regex: searchText, $options: "i" } },
+        { description: { $regex: searchText, $options: "i" } },
+        { "receivedFrom.name": { $regex: searchText, $options: "i" } },
+        { "receivedFrom.phone": { $regex: searchText, $options: "i" } },
+        { createdBy: { $in: creators.map(user => user._id) } },
       ];
     }
 
@@ -392,14 +410,20 @@ router.post("/", authMiddleware, async (req, res) => {
         error: "Amount is required and must be positive" 
       });
     }
-    if (!source) {
+    if (typeof source !== "string" || !source.trim()) {
       return res.status(400).json({ 
         error: "Source is required" 
       });
     }
-    if (!category) {
-      return res.status(400).json({ 
-        error: "Category is required" 
+    if (typeof category !== "string" || !category.trim()) {
+      return res.status(400).json({
+        error: "Category is required"
+      });
+    }
+    const sender = normalizeReceivedFrom(receivedFrom);
+    if (!sender.name || !sender.phone) {
+      return res.status(400).json({
+        error: "Sender name and phone are required"
       });
     }
 
@@ -423,8 +447,8 @@ router.post("/", authMiddleware, async (req, res) => {
       source: source.trim(),
       paymentMethod: normalizedPM,
       category: category.trim(),
-      description: description ? description.trim() : "",
-      receivedFrom: receivedFrom || {},
+      description: typeof description === "string" ? description.trim() : "",
+      receivedFrom: sender,
       createdBy: req.user.userId
     };
 
@@ -493,17 +517,17 @@ router.put("/:id", authMiddleware, async (req, res) => {
         error: "Amount is required and must be positive" 
       });
     }
-    if (!source) {
+    if (typeof source !== "string" || !source.trim()) {
       return res.status(400).json({ 
         error: "Source is required" 
       });
     }
-    if (!category) {
+    if (typeof category !== "string" || !category.trim()) {
       return res.status(400).json({ 
         error: "Category is required" 
       });
     }
-    if (!reason || reason.trim() === "") {
+    if (typeof reason !== "string" || !reason.trim()) {
       return res.status(400).json({ 
         error: "Reason for editing is required" 
       });
@@ -545,11 +569,16 @@ router.put("/:id", authMiddleware, async (req, res) => {
     // Track changes for audit
     const changes = new Map();
     
-    if (originalEntry.amount !== entryAmount) {
+    if (originalEntry.amount !== amountSnapshot.amount) {
       changes.set('amount', { 
         from: originalEntry.amount, 
-        to: entryAmount 
+        to: amountSnapshot.amount
       });
+    }
+    for (const field of ["enteredAmount", "enteredCurrency", "amountUSD", "amountFC", "exchangeRate"]) {
+      if (originalEntry[field] !== amountSnapshot[field]) {
+        changes.set(field, { from: originalEntry[field], to: amountSnapshot[field] });
+      }
     }
     if (originalEntry.source !== source) {
       changes.set('source', { 
@@ -726,11 +755,9 @@ router.patch("/:id/restore", authMiddleware, async (req, res) => {
 router.get("/stats/daily", authMiddleware, async (req, res) => {
   try {
     const { date } = req.query;
-    const targetDate = date ? new Date(date) : new Date();
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    const { createdAt } = buildTimeframeFilter({ date });
+    const startOfDay = createdAt.$gte;
+    const endOfDay = createdAt.$lte;
 
     const dailyEntries = await Entry.aggregate([
       {
@@ -778,7 +805,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
     }, {});
 
     res.json({
-      date: targetDate.toISOString().split("T")[0],
+      date: new Date(startOfDay.getTime() + 2 * 60 * 60 * 1000).toISOString().split("T")[0],
       totalEntries: dailyEntries[0]?.totalEntries || 0,
       totalAmount: dailyEntries[0]?.totalAmount || 0,
       categoryBreakdown,
@@ -787,6 +814,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching daily entry stats:", error);
+    if (/Invalid date/.test(error.message)) return res.status(400).json({ error: error.message });
     res.status(500).json({ error: "Failed to fetch daily statistics" });
   }
 });

@@ -117,6 +117,7 @@ app.use("/api/entries", require("./routes/entries"));
 app.use("/api/settings", require("./routes/settings"));
 app.use("/api/analytics", require("./routes/analytics"));
 app.use("/api/creditors", require("./routes/creditors"));
+app.use("/api/dashboard", require("./routes/dashboard"));
 // Default route
 app.get("/", (req, res) => {
   res.send("ERP/POS System Backend is running...");
@@ -136,6 +137,16 @@ mongoose
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
+    // Start the stock ledger for products it does not cover yet (first run
+    // after deployment, or products inserted directly into the database).
+    // Idempotent, never changes a stock value, and does not delay startup.
+    const { ensureStockBaselines } = require("./utils/stockLedger");
+    const { runTransaction } = require("./utils/transaction");
+    ensureStockBaselines({ runTransaction })
+      .then(({ created, failed }) => {
+        if (created || failed) console.log(`📦 Stock ledger baselines: ${created} recorded, ${failed} failed`);
+      })
+      .catch((error) => console.error("Stock ledger baseline error:", error.message));
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err.message);

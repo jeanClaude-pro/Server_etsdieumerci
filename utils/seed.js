@@ -4,6 +4,8 @@ require("dotenv").config();
 // NOTE: ensure your model export matches this path & name:
 // module.exports = mongoose.model("Product", productSchema);
 const Product = require("../models/Product");
+const { recordInitialStock } = require("./stockLedger");
+const { runTransaction } = require("./transaction");
 
 // --- DB Connect ---
 const MONGO_URI =
@@ -138,10 +140,22 @@ async function seed() {
   await connectDB();
 
   try {
-    // Optional: clear existing products before seeding
-    // await Product.deleteMany({});
+    // Never clear Product independently: product deletion must write a
+    // compensating ledger movement through the application workflow.
 
-    const result = await Product.insertMany(products, { ordered: false });
+    const result = await runTransaction(async (session) => {
+      const at = new Date();
+      const seeded = products.map((product) => ({
+        ...product,
+        stockTrackedSince: at,
+        lastStockUpdatedAt: at,
+      }));
+      const inserted = await Product.insertMany(seeded, { ordered: false, session });
+      for (const product of inserted) {
+        await recordInitialStock(product, { session, at });
+      }
+      return inserted;
+    });
     console.log(`✅ Seeded ${result.length} products`);
   } catch (error) {
     console.error("❌ Error seeding products:", error?.message || error);
