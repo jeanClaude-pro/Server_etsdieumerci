@@ -252,6 +252,72 @@ function periodFlowStages() {
   ];
 }
 
+/**
+ * Reduces the period ledger to one row per product that had a net sale.
+ * Sale edits, voids and deletions are netted per (sale, product), exactly as
+ * in periodFlowStages. Quantities stay separated by product, so products
+ * measured in packs, kg, lbs, etc. are never added to piece totals.
+ */
+function soldProductFlowStages() {
+  return [
+    { $sort: { occurredAt: 1, _id: 1 } },
+    {
+      $group: {
+        _id: {
+          $cond: [
+            isSaleMovement,
+            { sale: "$sale", product: "$product" },
+            { movement: "$_id", product: "$product" },
+          ],
+        },
+        product: { $first: "$product" },
+        productName: { $last: "$productName" },
+        productCategory: { $last: "$productCategory" },
+        productUnit: { $last: "$productUnit" },
+        productUnitKey: { $last: "$productUnitKey" },
+        saleLinked: { $first: isSaleMovement },
+        type: { $first: "$type" },
+        net: { $sum: "$quantity" },
+        lastOccurredAt: { $max: "$occurredAt" },
+      },
+    },
+    { $sort: { product: 1, lastOccurredAt: 1 } },
+    {
+      $group: {
+        _id: "$product",
+        name: { $last: "$productName" },
+        category: { $last: "$productCategory" },
+        unit: { $last: "$productUnit" },
+        unitKey: { $last: "$productUnitKey" },
+        baseline: { $sum: { $cond: [{ $eq: ["$type", "baseline"] }, "$net", 0] } },
+        entries: { $sum: { $cond: [{ $in: ["$type", ENTRY_MOVEMENT_TYPES] }, "$net", 0] } },
+        newProducts: { $sum: { $cond: [{ $eq: ["$type", "initial"] }, "$net", 0] } },
+        piecesOut: { $sum: { $cond: ["$saleLinked", negativePart("$net"), 0] } },
+        returns: { $sum: { $cond: ["$saleLinked", positivePart("$net"), 0] } },
+        adjustmentsIn: {
+          $sum: { $cond: [{ $in: ["$type", ADJUSTMENT_MOVEMENT_TYPES] }, positivePart("$net"), 0] },
+        },
+        adjustmentsOut: {
+          $sum: { $cond: [{ $in: ["$type", ADJUSTMENT_MOVEMENT_TYPES] }, negativePart("$net"), 0] },
+        },
+        net: { $sum: "$net" },
+      },
+    },
+    { $match: { piecesOut: { $gt: 0 } } },
+    {
+      $lookup: {
+        from: Product.collection.name,
+        localField: "_id",
+        foreignField: "_id",
+        as: "currentProduct",
+      },
+    },
+    { $set: { currentStock: { $arrayElemAt: ["$currentProduct.stock", 0] } } },
+    { $project: { currentProduct: 0 } },
+    { $sort: { piecesOut: -1, name: 1, _id: 1 } },
+  ];
+}
+
 const EMPTY_FLOWS = Object.freeze({
   baseline: 0,
   entries: 0,
@@ -426,4 +492,5 @@ module.exports = {
   roundQuantity,
   seriesGranularity,
   seriesKeys,
+  soldProductFlowStages,
 };

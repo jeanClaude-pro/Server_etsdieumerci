@@ -1,5 +1,6 @@
 const express = require("express");
 const Product = require("../models/Product");
+const Sale = require("../models/Sale");
 const StockMovement = require("../models/StockMovement");
 const authMiddleware = require("../middleware/auth");
 const isAdmin = require("../middleware/isAdmin");
@@ -21,6 +22,7 @@ const {
   reconcileStock,
   roundQuantity,
   seriesGranularity,
+  soldProductFlowStages,
 } = require("../utils/stockLedger");
 const { isPieceUnitExpression, unitDimension } = require("../utils/inventoryUnits");
 
@@ -167,17 +169,29 @@ router.get("/summary", async (req, res) => {
     const { start, end } = period;
     const granularity = seriesGranularity(start, end);
 
-    const [productResult, movementResult, baselineResult] = await Promise.all([
+    const [productResult, movementResult, baselineResult, salesResult] = await Promise.all([
       Product.aggregate(productHealthPipeline()),
       StockMovement.aggregate(buildPeriodMovementPipeline({
         start,
         end,
         granularity,
         metricMatch: { productUnitKey: "piece" },
+        extraFacets: {
+          soldProducts: [
+            { $match: { occurredAt: { $lte: end } } },
+            ...soldProductFlowStages(),
+          ],
+        },
       })).allowDiskUse(true),
       StockMovement.aggregate([
         { $match: { type: "baseline", productUnitKey: "piece" } },
         { $group: { _id: null, latest: { $max: "$occurredAt" } } },
+      ]),
+      // Same transaction definition as Sales History: completed sale records
+      // created in the selected period, independent of item count or edits.
+      Sale.aggregate([
+        { $match: { type: "sale", status: "completed", createdAt: { $gte: start, $lte: end } } },
+        { $count: "total" },
       ]),
     ]);
 
@@ -225,6 +239,16 @@ router.get("/summary", async (req, res) => {
         becameOutOfStock: countOf(movements.becameOutOfStock),
       },
       activity: activityCounts(movements.activity),
+      soldProductMovements: (movements.soldProducts || []).map((row) => ({
+        productId: row._id,
+        name: row.name || "Article inconnu",
+        category: row.category || "",
+        unit: row.unit || "non renseignée",
+        unitKey: row.unitKey || "unspecified",
+        currentStock: row.currentStock === undefined ? null : roundQuantity(row.currentStock),
+        flows: normalizeFlows(row),
+      })),
+      transactions: { sales: salesResult[0]?.total || 0 },
       series: buildStockSeries({
         start,
         end,

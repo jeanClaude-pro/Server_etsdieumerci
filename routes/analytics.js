@@ -92,7 +92,6 @@ async function aggregatePeriod(createdAt) {
               },
             },
             { $sort: { quantity: -1, revenue: -1 } },
-            { $limit: 10 },
           ],
           productCount: [
             { $unwind: "$items" },

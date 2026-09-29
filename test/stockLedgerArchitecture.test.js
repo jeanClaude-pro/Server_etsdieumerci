@@ -48,9 +48,17 @@ test("the dashboard route is admin-only and read-only", () => {
   assert.match(dashboard, /router\.use\(authMiddleware, isAdmin\)/);
   assert.doesNotMatch(dashboard, /router\.(post|put|patch|delete)\(/);
   assert.doesNotMatch(dashboard, /\.(save|create|insertMany|updateOne|updateMany|findOneAndUpdate|bulkWrite|deleteOne|deleteMany)\(/);
-  assert.doesNotMatch(dashboard, /require\("\.\.\/models\/(Sale|ExchangeRate)"\)/, "no monetary or rate data is read");
+  assert.doesNotMatch(dashboard, /require\("\.\.\/models\/ExchangeRate"\)/, "no monetary or rate data is read");
+  assert.match(dashboard, /Sale\.aggregate\(/, "transaction count uses the same sale collection as Sales History");
   const index = read("index.js");
   assert.match(index, /app\.use\("\/api\/dashboard", require\("\.\/routes\/dashboard"\)\)/);
+});
+
+test("products are permanent catalogue records and can only be made inactive", () => {
+  const products = read("routes/products.js");
+  assert.match(products, /router\.delete\([\s\S]*?status\(405\)/);
+  assert.doesNotMatch(products, /Product\.(findOneAndDelete|deleteOne|deleteMany)/);
+  assert.match(products, /updateData\.status = status/);
 });
 
 test("the fiche de stock endpoint is admin-only like exact stock figures elsewhere", () => {

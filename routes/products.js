@@ -8,8 +8,6 @@ const isAdmin = require("../middleware/isAdmin");
 const { SELLABLE_PRODUCT_FILTER } = require("../utils/productAvailability");
 const {
   buildTimeframeFilter,
-  paginationMetadata,
-  parsePagination,
 } = require("../utils/queryHelpers");
 const {
   StockChangeError,
@@ -20,7 +18,6 @@ const {
   normalizeFlows,
   reconcileStock,
   recordInitialStock,
-  recordProductDeletion,
   roundQuantity,
   seriesGranularity,
 } = require("../utils/stockLedger");
@@ -74,7 +71,7 @@ function parseStockQuantity(value, fieldName = "stock") {
 router.get("/", authMiddleware, async (req, res) => {
   console.log("Fetching products with filters:", req.query);
   try {
-    const { search, category, status, availability } = req.query;
+    const { search, category, status, availability, includeInactive } = req.query;
 
     // Build filter object
     const filter = {};
@@ -89,6 +86,10 @@ router.get("/", authMiddleware, async (req, res) => {
 
     if (status) {
       filter.status = status;
+    } else if (includeInactive !== "true") {
+      // Inactive products stay in the catalogue for audit/reactivation, but
+      // ordinary product lists must not offer or display them.
+      filter.status = "active";
     }
 
     // NewSale asks only for products that can be sold right now.
@@ -120,7 +121,6 @@ router.get("/:id/stock-card", authMiddleware, isAdmin, async (req, res) => {
     if (range.$gte > now) {
       return res.status(400).json({ error: "La période commence dans le futur" });
     }
-    const { page, limit, skip } = parsePagination(req.query, 25, 100);
     const productId = new mongoose.Types.ObjectId(req.params.id);
 
     let product = await Product.findById(productId)
@@ -157,24 +157,6 @@ router.get("/:id/stock-card", authMiddleware, isAdmin, async (req, res) => {
         end: range.$lte,
         match: { product: productId },
         granularity,
-        extraFacets: {
-          movements: [
-            { $match: { occurredAt: { $lte: range.$lte } } },
-            { $sort: { occurredAt: 1, _id: 1 } },
-            { $skip: skip },
-            { $limit: limit },
-            {
-              $project: {
-                type: 1, quantity: 1, stockBefore: 1, stockAfter: 1, occurredAt: 1,
-                saleNumber: 1, sale: 1, userName: 1, reason: 1,
-              },
-            },
-          ],
-          movementCount: [
-            { $match: { occurredAt: { $lte: range.$lte } } },
-            { $count: "total" },
-          ],
-        },
       })),
       // Whole-ledger check for this product: Σ movements must equal its stock.
       StockMovement.aggregate([
@@ -209,8 +191,6 @@ router.get("/:id/stock-card", authMiddleware, isAdmin, async (req, res) => {
       netAfterEnd: facet.afterEnd?.[0]?.net,
       flows,
     });
-    const totalMovements = facet.movementCount?.[0]?.total || 0;
-
     res.json({
       success: true,
       source: "mongodb-aggregation",
@@ -238,8 +218,6 @@ router.get("/:id/stock-card", authMiddleware, isAdmin, async (req, res) => {
         closing: coverage.closingKnown ? closing : null,
         coverage,
       }),
-      movements: facet.movements || [],
-      pagination: paginationMetadata(page, limit, totalMovements),
     });
   } catch (error) {
     console.error("Error building stock card:", error);
@@ -438,27 +416,12 @@ router.put("/:id", authMiddleware, isAdmin, async (req, res) => {
   }
 });
 
-// DELETE /api/products/:id - Delete a product
-router.delete("/:id", authMiddleware, isAdmin, async (req, res) => {
-  try {
-    const deletedProduct = await runTransaction(async (session) => {
-      const deleted = await Product.findOneAndDelete({ _id: req.params.id }, { session }).lean();
-      if (!deleted) return null;
-      // The ledger keeps the product's history and removes its pieces from
-      // the inventory total at the moment of deletion.
-      await recordProductDeletion(deleted, { session, user: req.user, at: new Date() });
-      return deleted;
-    });
-
-    if (!deletedProduct) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-
-    res.json({ message: "Product deleted successfully" });
-  } catch (error) {
-    console.error("Error deleting product:", error);
-    return sendProductMutationError(res, error, "Failed to delete product");
-  }
+// Products are permanent catalogue records. Deactivation preserves their
+// stock ledger and historical references while removing them from sale lists.
+router.delete("/:id", authMiddleware, isAdmin, (_req, res) => {
+  res.status(405).json({
+    error: "Un article ne peut pas être supprimé. Passez son statut à inactif.",
+  });
 });
 
 module.exports = router;

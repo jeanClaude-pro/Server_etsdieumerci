@@ -61,9 +61,13 @@ function fixtures() {
   ];
   // A historical FC sale: the dashboard must never read or rewrite it.
   const sales = [{
-    _id: "S2", status: "completed", type: "sale", total: 7.017543859649122, exchangeRate: 2850,
+    _id: "S1", status: "completed", type: "sale", createdAt: at("2025-03-10T08:00:00Z"), total: 5,
+  }, {
+    _id: "S2", status: "completed", type: "sale", createdAt: at("2025-03-10T10:00:00Z"), total: 7.017543859649122, exchangeRate: 2850,
     items: [{ productId: "P4", quantity: 12, enteredPrice: 20000, enteredCurrency: "FC", priceFC: 20000,
       priceUSD: 20000 / 2850, price: 20000 / 2850, exchangeRate: 2850 }],
+  }, {
+    _id: "S3", status: "voided", type: "sale", createdAt: at("2025-03-10T11:00:00Z"), total: 4,
   }];
   return { products, movements, sales };
 }
@@ -86,11 +90,12 @@ async function startApp(t, data) {
     return { select: () => promise, then: (resolve, reject) => promise.then(resolve, reject) };
   });
 
-  const collections = { [Product.collection.name]: data.products, [StockMovement.collection.name]: data.movements };
+  const collections = { [Product.collection.name]: data.products, [StockMovement.collection.name]: data.movements, [Sale.collection.name]: data.sales };
   const run = (pipeline, rows) =>
     aggregateResult(Promise.resolve(new Aggregator(pipeline, { collectionResolver: (name) => collections[name] || [] }).run(rows)));
   t.mock.method(Product, "aggregate", (pipeline) => run(pipeline, data.products));
   t.mock.method(StockMovement, "aggregate", (pipeline) => run(pipeline, data.movements));
+  t.mock.method(Sale, "aggregate", (pipeline) => run(pipeline, data.sales));
 
   const writes = [];
   for (const Model of [Product, StockMovement, Sale]) {
@@ -100,7 +105,7 @@ async function startApp(t, data) {
         throw new Error("write attempted");
       });
     }
-    for (const method of ["aggregate", "find", "findOne", "findById"]) {
+    for (const method of ["find", "findOne", "findById"]) {
       if (Model === Sale) t.mock.method(Model, method, () => { writes.push(`Sale.${method}`); throw new Error("sale read"); });
     }
   }
@@ -173,11 +178,16 @@ test("admin summary reconstructs the day from the ledger and never writes", asyn
     ["Sac rouge", 10, 10, 0],
   ]);
   assert.deepEqual(body.series, [{ key: "2025-03-10", net: 2, level: 68 }]);
+  assert.deepEqual(body.soldProductMovements.map((row) => [row.productId, row.flows.piecesOut]), [
+    ["P4", 12],
+    ["P1", 5],
+  ]);
+  assert.deepEqual(body.transactions, { sales: 2 });
 
   assert.deepEqual(writes, []);
   assert.deepEqual(data, before, "products, ledger and FC sale snapshot are byte-for-byte unchanged");
-  assert.equal(data.sales[0].items[0].enteredPrice, 20000);
-  assert.equal(data.sales[0].items[0].enteredCurrency, "FC");
+  assert.equal(data.sales[1].items[0].enteredPrice, 20000);
+  assert.equal(data.sales[1].items[0].enteredCurrency, "FC");
   assert.equal(data.products[3].price, 12.5);
 });
 
@@ -186,10 +196,13 @@ test("mixed kg/lbs quantities are reported separately and excluded from pieces",
   data.products.push(
     { ...baseProduct("KG", "Farine", 50, 5), unit: "kg" },
     { ...baseProduct("LB", "Coton", 20, 5), unit: "lbs" },
+    { ...baseProduct("PACK", "Carton", 101, 5), unit: "packs" },
   );
   data.movements.push(
     { _id: "MKG", product: "KG", productName: "Farine", productCategory: "Vrac", productUnit: "kg", productUnitKey: "kg", type: "baseline", quantity: 50, stockBefore: 0, stockAfter: 50, occurredAt: tracked },
     { _id: "MLB", product: "LB", productName: "Coton", productCategory: "Vrac", productUnit: "lbs", productUnitKey: "lbs", type: "baseline", quantity: 20, stockBefore: 0, stockAfter: 20, occurredAt: tracked },
+    { _id: "MPACK0", product: "PACK", productName: "Carton", productCategory: "Emballages", productUnit: "packs", productUnitKey: "packs", type: "baseline", quantity: 105, stockBefore: 0, stockAfter: 105, occurredAt: tracked },
+    { _id: "MPACK1", product: "PACK", productName: "Carton", productCategory: "Emballages", productUnit: "packs", productUnitKey: "packs", type: "sale", quantity: -4, stockBefore: 105, stockAfter: 101, occurredAt: at("2025-03-10T14:00:00Z"), sale: "SPACK", saleNumber: "SPACK" },
   );
   const { get } = await startApp(t, data);
   const { status, body } = await get("/dashboard/summary?date=2025-03-10");
@@ -198,9 +211,13 @@ test("mixed kg/lbs quantities are reported separately and excluded from pieces",
   assert.equal(body.stock.closing, 68);
   assert.deepEqual(
     body.units.map(({ unit, quantity }) => [unit, quantity]).sort(),
-    [["kg", 50], ["lbs", 20], ["pcs", 71]],
+    [["kg", 50], ["lbs", 20], ["packs", 101], ["pcs", 71]],
   );
   assert.equal(body.categories.reduce((sum, row) => sum + row.pieces, 0), 71);
+  const packs = body.soldProductMovements.find((row) => row.productId === "PACK");
+  assert.equal(packs.unit, "packs");
+  assert.equal(packs.currentStock, 101);
+  assert.equal(packs.flows.piecesOut, 4);
 });
 
 test("a period older than the ledger baseline is reported as not reconstructible", async (t) => {

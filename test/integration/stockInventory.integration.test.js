@@ -334,7 +334,7 @@ test("fiche de stock and dashboard read the same ledger and change nothing", asy
   const movementCount = await StockMovement.countDocuments();
   const today = currentBusinessDate();
 
-  const card = await api("GET", `/products/${product._id}/stock-card?date=${today}&limit=4`);
+  const card = await api("GET", `/products/${product._id}/stock-card?date=${today}`);
   assert.equal(card.status, 200);
   const { summary, coverage } = card.body;
   assert.equal(coverage.openingKnown, true, "created through the API: tracked from creation");
@@ -357,16 +357,8 @@ test("fiche de stock and dashboard read the same ledger and change nothing", asy
     summary.flows.adjustmentsIn - summary.flows.adjustmentsOut + summary.flows.baseline, summary.closing);
   assert.equal(card.body.integrity.consistent, true);
   assert.equal(new Date(summary.lastStockUpdatedAt).getTime(), product.lastStockUpdatedAt.getTime());
-  assert.equal(card.body.movements.length, 4);
-  assert.equal(card.body.pagination.totalPages, Math.ceil(card.body.pagination.totalRecords / 4));
-  const allRows = [];
-  for (let page = 1; page <= card.body.pagination.totalPages; page += 1) {
-    allRows.push(...(await api("GET", `/products/${product._id}/stock-card?date=${today}&limit=4&page=${page}`)).body.movements);
-  }
-  for (let index = 1; index < allRows.length; index += 1) {
-    assert.equal(allRows[index].stockBefore, allRows[index - 1].stockAfter, "running balance is continuous");
-  }
-  assert.equal(allRows.at(-1).stockAfter, product.stock);
+  assert.equal(card.body.movements, undefined, "individual sale movements stay in Sales History");
+  assert.equal(card.body.pagination, undefined, "the aggregate stock-card summary is not paginated");
 
   const dashboard = await api("GET", `/dashboard/summary?date=${today}`);
   assert.equal(dashboard.status, 200);
@@ -389,20 +381,26 @@ test("fiche de stock and dashboard read the same ledger and change nothing", asy
   assert.equal(await StockMovement.countDocuments(), movementCount, "reading never writes the ledger");
 });
 
-test("deleting a product writes off its stock and keeps the ledger balanced", async () => {
-  const created = await api("POST", "/products", { name: "À supprimer", category: "Sacs", price: 1, stock: 7 });
+test("a created product is permanent and inactivity removes it from sellable lists", async () => {
+  const created = await api("POST", "/products", { name: "À désactiver", category: "Sacs", price: 1, stock: 7 });
   const deleted = await api("DELETE", `/products/${created.body._id}`);
-  assert.equal(deleted.status, 200);
+  assert.equal(deleted.status, 405);
+  const inactive = await api("PUT", `/products/${created.body._id}`, { status: "inactive" });
+  assert.equal(inactive.status, 200);
+  assert.equal(inactive.body.status, "inactive");
   const movements = await movementsOf(created.body._id);
-  assert.deepEqual(movements.map((movement) => [movement.type, movement.quantity]), [["initial", 7], ["product_delete", -7]]);
+  assert.deepEqual(movements.map((movement) => [movement.type, movement.quantity]), [["initial", 7]]);
   const card = await api("GET", `/products/${created.body._id}/stock-card?date=${currentBusinessDate()}`);
   assert.equal(card.status, 200);
-  assert.equal(card.body.product.deleted, true);
-  assert.equal(card.body.product.name, "À supprimer");
+  assert.equal(card.body.product.deleted, undefined);
+  assert.equal(card.body.product.name, "À désactiver");
+  assert.equal(card.body.product.status, "inactive");
   assert.equal(card.body.summary.opening, 0);
-  assert.equal(card.body.summary.closing, 0);
+  assert.equal(card.body.summary.closing, 7);
   assert.equal(card.body.summary.flows.entries, 7);
-  assert.equal(card.body.summary.flows.adjustmentsOut, 7);
+  assert.equal(card.body.summary.flows.adjustmentsOut, 0);
   assert.equal(card.body.integrity.consistent, true);
+  const sellable = await api("GET", "/products?availability=sellable");
+  assert.ok(!sellable.body.some((row) => String(row._id) === String(created.body._id)));
   await assertLedgerMatchesStock();
 });

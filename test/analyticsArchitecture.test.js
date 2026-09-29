@@ -29,3 +29,7 @@ test("Analytics backend aggregates every financial collection and declares no pa
   assert.match(serverAnalytics, /paginated: false/);
   assert.doesNotMatch(serverAnalytics, /parsePagination|\$skip|\$limit: limit/);
 });
+
+test("Analytics returns every sold product instead of truncating the list to ten", () => {
+  assert.doesNotMatch(serverAnalytics, /\$limit:\s*10/);
+});
