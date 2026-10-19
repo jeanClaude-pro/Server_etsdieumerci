@@ -5,6 +5,7 @@ const cors = require("cors");
 const morgan = require("morgan");
 const helmet = require("helmet");
 const { preventNoSqlInjection } = require("./middleware/security");
+const auditTrail = require("./middleware/auditTrail");
 const { validateReceiptTokenConfiguration } = require("./utils/receiptTokenCrypto");
 
 try {
@@ -44,6 +45,8 @@ app.use((error, _req, res, next) => {
   next(error);
 });
 app.use(morgan("combined"));
+// Security journal: observes every API request once its response is sent.
+app.use("/api", auditTrail);
 app.use(preventNoSqlInjection);
 
 // Allow all origins with explicit headers so Authorization is never stripped
@@ -118,6 +121,7 @@ app.use("/api/settings", require("./routes/settings"));
 app.use("/api/analytics", require("./routes/analytics"));
 app.use("/api/creditors", require("./routes/creditors"));
 app.use("/api/dashboard", require("./routes/dashboard"));
+app.use("/api/audit", require("./routes/audit"));
 // Default route
 app.get("/", (req, res) => {
   res.send("ERP/POS System Backend is running...");

@@ -312,7 +312,12 @@ function soldProductFlowStages() {
         as: "currentProduct",
       },
     },
-    { $set: { currentStock: { $arrayElemAt: ["$currentProduct.stock", 0] } } },
+    {
+      $set: {
+        currentStock: { $arrayElemAt: ["$currentProduct.stock", 0] },
+        currentMinStock: { $arrayElemAt: ["$currentProduct.minStock", 0] },
+      },
+    },
     { $project: { currentProduct: 0 } },
     { $sort: { piecesOut: -1, name: 1, _id: 1 } },
   ];

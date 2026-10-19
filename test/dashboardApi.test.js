@@ -182,6 +182,11 @@ test("admin summary reconstructs the day from the ledger and never writes", asyn
     ["P4", 12],
     ["P1", 5],
   ]);
+  // Per-product story: opening + entries + returns − sold ± corrections = closing.
+  assert.deepEqual(body.soldProductMovements.map((row) => [row.productId, row.openingStock, row.closingStock, row.currentStock]), [
+    ["P4", 40, 47, 50],
+    ["P1", 5, 0, 0],
+  ]);
   assert.deepEqual(body.transactions, { sales: 2 });
 
   assert.deepEqual(writes, []);

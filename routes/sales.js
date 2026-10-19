@@ -7,6 +7,7 @@ const Sale = require("../models/Sale");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
 const authMiddleware = require("../middleware/auth");
+const { requirePageAccess } = require("../utils/accessPolicy");
 const {
   normalizeExchangeRate,
   normalizeSaleItemPricing,
@@ -495,7 +496,7 @@ function getTimeframeDescription(query) {
  * Timeframe-based pagination (no numeric pagination)
  * Priority: custom range > specific day > month > year > today (default)
  */
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     const { 
       customerPhone, 
@@ -761,7 +762,7 @@ router.get("/", authMiddleware, async (req, res) => {
 });
 
 /** Lightweight receipt-control totals for the complete matching sale period. */
-router.get("/scan-stats", authMiddleware, async (req, res) => {
+router.get("/scan-stats", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     const match = buildBusinessTimeframeFilter(req.query);
 
@@ -804,7 +805,7 @@ router.get("/scan-stats", authMiddleware, async (req, res) => {
 // ==================== ALL OTHER ROUTES REMAIN UNCHANGED ====================
 
 /** ---------- DAILY STATS FIRST (before :id) ---------- **/
-router.get("/stats/daily", authMiddleware, async (req, res) => {
+router.get("/stats/daily", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     const { date } = req.query;
     const targetDate = date ? new Date(date) : new Date();
@@ -857,7 +858,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
 });
 
 /** ---------- CREATE SALE OR EXPENSE ---------- **/
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", authMiddleware, requirePageAccess("/"), async (req, res) => {
   try {
     const {
       customer,
@@ -1043,7 +1044,8 @@ router.post("/", authMiddleware, async (req, res) => {
       exchangeRate: transactionExchangeRate,
       paymentMethod: normalizedPM,
       status: "completed",
-      salesPerson: salesPerson || "Admin",
+      // The seller is the authenticated user, never a name sent by the client.
+      salesPerson: req.user?.username || salesPerson || "Admin",
       type: effectiveSaleType,
       notes: notes || "",
       ...(receiptToken
@@ -1090,6 +1092,15 @@ router.post("/", authMiddleware, async (req, res) => {
       return createdSales[0];
     });
 
+    res.locals.audit = {
+      identityMismatch: Boolean(salesPerson && req.user?.username && salesPerson !== req.user.username),
+      resourceId: String(savedSale._id),
+      summary: {
+        saleNumber: savedSale.saleNumber,
+        total: savedSale.total,
+        items: enrichedItems.length,
+      },
+    };
     return res.status(201).json(safeSaleResponse(savedSale, receiptToken));
   } catch (error) {
     console.error("Error creating sale/expense:", error);
@@ -1100,7 +1111,7 @@ router.post("/", authMiddleware, async (req, res) => {
 // ==================== MODIFIED ENDPOINTS (REMOVE PAGINATION) ====================
 
 /** ---------- GET EXPENSES (TIME FRAME BASED) ---------- **/
-router.get("/expenses/all", authMiddleware, async (req, res) => {
+router.get("/expenses/all", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     const { 
       status 
@@ -1165,7 +1176,7 @@ router.get("/expenses/all", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET RESERVATIONS (TIME FRAME BASED) ---------- **/
-router.get("/reservations/all", authMiddleware, async (req, res) => {
+router.get("/reservations/all", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   return res.status(410).json({ error: "Le module Réservation a été supprimé" });
   /* istanbul ignore next -- retained below only to document legacy data shape */
   try {
@@ -1785,7 +1796,7 @@ router.post(
 );
 
 /** ---------- GET BY ID (after other specific routes) ---------- **/
-router.get("/:id", authMiddleware, async (req, res) => {
+router.get("/:id", authMiddleware, requirePageAccess("/sales", "/", "/payment-approval", "/payment-verification"), async (req, res) => {
   try {
     const saleId = req.params.id;
     
@@ -1834,7 +1845,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- EDIT SALE (Role-Based Restrictions) ---------- **/
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -2235,7 +2246,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- MARK RESERVATION AS COMPLETED ---------- **/
-router.patch("/:id/complete", authMiddleware, async (req, res) => {
+router.patch("/:id/complete", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   return res.status(410).json({ error: "Le module Réservation a été supprimé" });
   /* istanbul ignore next -- legacy endpoint intentionally disabled */
   try {
@@ -2278,7 +2289,7 @@ router.patch("/:id/complete", authMiddleware, async (req, res) => {
 });
 
 /** ---------- MARK RESERVATION AS PENDING ---------- **/
-router.patch("/:id/pending", authMiddleware, async (req, res) => {
+router.patch("/:id/pending", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   return res.status(410).json({ error: "Le module Réservation a été supprimé" });
   /* istanbul ignore next -- legacy endpoint intentionally disabled */
   try {
@@ -2322,7 +2333,7 @@ router.patch("/:id/pending", authMiddleware, async (req, res) => {
 });
 
 /** ---------- VOID/REFUND SALE ---------- **/
-router.patch("/:id/void", authMiddleware, async (req, res) => {
+router.patch("/:id/void", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ error: "Only admins can void sales" });
@@ -2403,7 +2414,7 @@ router.patch("/:id/void", authMiddleware, async (req, res) => {
 });
 
 /** ---------- DELETE SALE ---------- **/
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", authMiddleware, requirePageAccess("/sales"), async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ error: "Only admins can delete sales" });

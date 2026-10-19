@@ -181,6 +181,12 @@ router.get("/summary", async (req, res) => {
             { $match: { occurredAt: { $lte: end } } },
             ...soldProductFlowStages(),
           ],
+          // Net change per product after the period: closing of a product =
+          // its current stock − what moved after the period end.
+          afterEndByProduct: [
+            { $match: { occurredAt: { $gt: end } } },
+            { $group: { _id: "$product", net: { $sum: "$quantity" } } },
+          ],
         },
       })).allowDiskUse(true),
       StockMovement.aggregate([
@@ -197,6 +203,7 @@ router.get("/summary", async (req, res) => {
 
     const products = productResult[0] || {};
     const movements = movementResult[0] || {};
+    const afterEndByProduct = new Map((movements.afterEndByProduct || []).map((row) => [String(row._id), row.net]));
     const totals = products.totals?.[0] || { pieces: 0, products: 0, pieceProducts: 0, untracked: 0 };
     const catalogue = products.catalogue?.[0] || { active: 0, inactive: 0 };
 
@@ -239,15 +246,28 @@ router.get("/summary", async (req, res) => {
         becameOutOfStock: countOf(movements.becameOutOfStock),
       },
       activity: activityCounts(movements.activity),
-      soldProductMovements: (movements.soldProducts || []).map((row) => ({
-        productId: row._id,
-        name: row.name || "Article inconnu",
-        category: row.category || "",
-        unit: row.unit || "non renseignée",
-        unitKey: row.unitKey || "unspecified",
-        currentStock: row.currentStock === undefined ? null : roundQuantity(row.currentStock),
-        flows: normalizeFlows(row),
-      })),
+      soldProductMovements: (movements.soldProducts || []).map((row) => {
+        const rowFlows = normalizeFlows(row);
+        const afterEnd = afterEndByProduct.get(String(row._id)) || 0;
+        const current = row.currentStock === undefined || row.currentStock === null ? null : roundQuantity(row.currentStock);
+        // stock(t) = Σ movements ≤ t, per product, from the append-only ledger.
+        const closingStock = current === null ? null : roundQuantity(current - afterEnd);
+        // A baseline recorded inside the period means the product's earlier
+        // history is unknown: its opening cannot be stated exactly.
+        const openingKnown = closingStock !== null && rowFlows.baseline === 0;
+        return {
+          productId: row._id,
+          name: row.name || "Article inconnu",
+          category: row.category || "",
+          unit: row.unit || "non renseignée",
+          unitKey: row.unitKey || "unspecified",
+          currentStock: current,
+          minStock: row.currentMinStock === undefined || row.currentMinStock === null ? null : roundQuantity(row.currentMinStock),
+          openingStock: openingKnown ? roundQuantity(closingStock - rowFlows.net) : null,
+          closingStock,
+          flows: rowFlows,
+        };
+      }),
       transactions: { sales: salesResult[0]?.total || 0 },
       series: buildStockSeries({
         start,

@@ -68,6 +68,7 @@ router.post("/", authMiddleware, async (req, res) => {
       });
     }
 
+    const previous = await ExchangeRate.findOne({ isActive: true }).sort({ effectiveFrom: -1 }).lean();
     // Deactivate all previous rates
     await ExchangeRate.updateMany(
       { isActive: true },
@@ -83,6 +84,11 @@ router.post("/", authMiddleware, async (req, res) => {
     });
 
     const savedRate = await newRate.save();
+    res.locals.audit = {
+      previousRate: previous?.rate || null,
+      newRate: savedRate.rate,
+      summary: { previousRate: previous?.rate || null, newRate: savedRate.rate },
+    };
 
     res.status(201).json({
       message: "Exchange rate updated successfully",
@@ -125,8 +131,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
       });
     }
 
+    const rateBefore = existingRate.rate;
     // Update rate
     if (rate) existingRate.rate = parseFloat(rate);
+    res.locals.audit = { previousRate: rateBefore, newRate: existingRate.rate, summary: { previousRate: rateBefore, newRate: existingRate.rate } };
     if (notes !== undefined) existingRate.notes = notes;
 
     const updatedRate = await existingRate.save();

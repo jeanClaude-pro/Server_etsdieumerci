@@ -4,6 +4,7 @@ const Expense = require("../models/Expense");
 const Creditor = require("../models/Creditor");
 const mongoose = require("mongoose");
 const authMiddleware = require("../middleware/auth");
+const { requireAdmin, requirePageAccess } = require("../utils/accessPolicy");
 const nodemailer = require("nodemailer");
 const { normalizeAmountSnapshot } = require("../utils/salePricing");
 const { calculateValidationRate } = require("../utils/financialCalculations");
@@ -405,7 +406,7 @@ function isAdminUser(user) {
  * Timeframe-based pagination (no numeric pagination)
  * Priority: custom range > specific day > month > year > today (default)
  */
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const { 
       status, 
@@ -582,7 +583,7 @@ router.get("/", authMiddleware, async (req, res) => {
 // ==================== ALL OTHER ROUTES ====================
 
 /** ---------- CREATE EXPENSE ---------- **/
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", authMiddleware, requirePageAccess("/sortie"), async (req, res) => {
   try {
     const { reason, recipientName, recipientPhone, amount, paymentMethod, notes, recordedBy } = req.body;
 
@@ -608,7 +609,11 @@ router.post("/", authMiddleware, async (req, res) => {
     const sanitizedRecipientName = sanitizeInput(recipientName);
     const sanitizedRecipientPhone = sanitizeInput(recipientPhone || (isRepayment ? "N/A" : "")).replace(/\s+/g, "");
     const sanitizedNotes = sanitizeInput(notes);
-    const sanitizedRecordedBy = sanitizeInput(recordedBy || req.user?.id || "Unknown");
+    // The author is the authenticated user, never a name sent by the client.
+    const sanitizedRecordedBy = sanitizeInput(req.user?.username || req.user?.id || "Unknown");
+    if (recordedBy && req.user?.username && recordedBy !== req.user.username) {
+      res.locals.audit = { identityMismatch: true, summary: { claimedRecordedBy: String(recordedBy).slice(0, 80) } };
+    }
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
 
@@ -681,7 +686,7 @@ router.post("/", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET EXPENSE BY ID ---------- **/
-router.get("/:id", authMiddleware, async (req, res) => {
+router.get("/:id", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
     if (!expense) {
@@ -698,7 +703,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- VALIDATE EXPENSE ---------- **/
-router.patch("/:id/validate", authMiddleware, async (req, res) => {
+router.patch("/:id/validate", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const { validatedBy, notes } = req.body;
     
@@ -745,7 +750,13 @@ router.patch("/:id/validate", authMiddleware, async (req, res) => {
           current.repaymentAppliedBy = actorId;
         }
         current.status = "validated";
-        current.validatedBy = validatedBy || req.user?.username || String(actorId);
+        current.validatedBy = req.user?.username || String(actorId);
+        if (validatedBy && req.user?.username && validatedBy !== req.user.username) {
+          res.locals.audit = { identityMismatch: true, summary: { claimedValidatedBy: String(validatedBy).slice(0, 80) } };
+        }
+        if (current.recordedBy && req.user?.username && current.recordedBy === req.user.username && req.user.role !== "admin") {
+          res.locals.audit = { ...(res.locals.audit || {}), selfValidation: true };
+        }
         current.validatedAt = now;
         current.notes = updatedNotes;
         updatedExpense = await current.save({ session });
@@ -763,7 +774,7 @@ router.patch("/:id/validate", authMiddleware, async (req, res) => {
 });
 
 /** ---------- REJECT EXPENSE ---------- **/
-router.patch("/:id/reject", authMiddleware, async (req, res) => {
+router.patch("/:id/reject", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const { reason, notes } = req.body;
     
@@ -814,7 +825,7 @@ router.patch("/:id/reject", authMiddleware, async (req, res) => {
 });
 
 /** ---------- UPDATE EXPENSE (ENHANCED FOR ALL STATUSES WITH ADMIN CHECK) ---------- **/
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const { reason, recipientName, recipientPhone, amount, paymentMethod, notes, updateReason } = req.body;
 
@@ -944,7 +955,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- ADMIN DELETE EXPENSE (FOR ANY STATUS) ---------- **/
-router.delete("/:id/admin", authMiddleware, async (req, res) => {
+router.delete("/:id/admin", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     // Check if user is admin
     if (!isAdminUser(req.user)) {
@@ -989,7 +1000,7 @@ router.delete("/:id/admin", authMiddleware, async (req, res) => {
 });
 
 /** ---------- REGULAR DELETE EXPENSE (FOR PENDING ONLY) ---------- **/
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
     if (!expense) {
@@ -1029,7 +1040,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET EXPENSE STATISTICS WITH TIMEFRAME FILTERING ---------- **/
-router.get("/stats/summary", authMiddleware, async (req, res) => {
+router.get("/stats/summary", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     // Build timeframe filter
     let timeframeFilter;
@@ -1153,7 +1164,7 @@ router.get("/stats/summary", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET EXPENSE HISTORY/AUDIT LOG ---------- **/
-router.get("/:id/history", authMiddleware, async (req, res) => {
+router.get("/:id/history", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const expense = await Expense.findById(req.params.id);
     if (!expense) {
@@ -1191,7 +1202,7 @@ router.get("/:id/history", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET EXPENSES BY RECIPIENT ---------- **/
-router.get("/recipient/:phone", authMiddleware, async (req, res) => {
+router.get("/recipient/:phone", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const { phone } = req.params;
     
@@ -1250,7 +1261,7 @@ router.get("/recipient/:phone", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET EXPENSES BY STATUS WITH TIMEFRAME ---------- **/
-router.get("/status/:status", authMiddleware, async (req, res) => {
+router.get("/status/:status", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const { status } = req.params;
     
@@ -1296,7 +1307,7 @@ router.get("/status/:status", authMiddleware, async (req, res) => {
 });
 
 /** ---------- TEST EMAIL ENDPOINT ---------- **/
-router.get("/test/email", authMiddleware, async (req, res) => {
+router.get("/test/email", authMiddleware, requireAdmin, async (req, res) => {
   try {
     // Create a test expense object
     const testExpense = {
@@ -1327,7 +1338,7 @@ router.get("/test/email", authMiddleware, async (req, res) => {
 });
 
 /** ---------- TEST UPDATE EMAIL ENDPOINT ---------- **/
-router.get("/test/email-update", authMiddleware, async (req, res) => {
+router.get("/test/email-update", authMiddleware, requireAdmin, async (req, res) => {
   try {
     // Create a test expense object
     const testExpense = {
@@ -1360,7 +1371,7 @@ router.get("/test/email-update", authMiddleware, async (req, res) => {
 });
 
 /** ---------- TEST DELETE EMAIL ENDPOINT ---------- **/
-router.get("/test/email-delete", authMiddleware, async (req, res) => {
+router.get("/test/email-delete", authMiddleware, requireAdmin, async (req, res) => {
   try {
     // Create a test expense info object
     const testExpenseInfo = {
@@ -1387,7 +1398,7 @@ router.get("/test/email-delete", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET USER PERMISSIONS ENDPOINT ---------- **/
-router.get("/permissions/me", authMiddleware, async (req, res) => {
+router.get("/permissions/me", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
     const user = req.user || {};
     const permissions = {

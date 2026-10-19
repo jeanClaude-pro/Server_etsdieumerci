@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Entry = require("../models/Entry");
 const User = require("../models/User");
 const authMiddleware = require("../middleware/auth");
+const { requirePageAccess } = require("../utils/accessPolicy");
 const { normalizeAmountSnapshot } = require("../utils/salePricing");
 const {
   buildTimeframeFilter: buildBusinessTimeframeFilter,
@@ -191,7 +192,7 @@ function normalizeReceivedFrom(receivedFrom) {
  * Timeframe-based pagination (no numeric pagination)
  * Priority: custom range > specific day > month > year > today (default)
  */
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const { 
       category,
@@ -393,7 +394,7 @@ router.get("/", authMiddleware, async (req, res) => {
 // ==================== ALL OTHER ROUTES ====================
 
 /** ---------- CREATE ENTRY (Everyone can create) ---------- */
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", authMiddleware, requirePageAccess("/entry"), async (req, res) => {
   try {
     const { 
       amount, 
@@ -467,7 +468,7 @@ router.post("/", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET ENTRY BY ID ---------- */
-router.get("/:id", authMiddleware, async (req, res) => {
+router.get("/:id", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const entryId = req.params.id;
     
@@ -491,7 +492,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- EDIT ENTRY (Admin only) ---------- */
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     // Check if user is admin
     if (req.user.role !== "admin") {
@@ -660,7 +661,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- DELETE ENTRY (Admin only - soft delete) ---------- */
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     // Check if user is admin
     if (req.user.role !== "admin") {
@@ -706,7 +707,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 });
 
 /** ---------- RESTORE ENTRY (Admin only) ---------- */
-router.patch("/:id/restore", authMiddleware, async (req, res) => {
+router.patch("/:id/restore", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     // Check if user is admin
     if (req.user.role !== "admin") {
@@ -752,7 +753,7 @@ router.patch("/:id/restore", authMiddleware, async (req, res) => {
 });
 
 /** ---------- DAILY ENTRY STATS (like your sales stats) ---------- */
-router.get("/stats/daily", authMiddleware, async (req, res) => {
+router.get("/stats/daily", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const { date } = req.query;
     const { createdAt } = buildTimeframeFilter({ date });
@@ -820,7 +821,7 @@ router.get("/stats/daily", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET ENTRY STATISTICS WITH TIMEFRAME FILTERING ---------- */
-router.get("/stats/summary", authMiddleware, async (req, res) => {
+router.get("/stats/summary", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     // Build timeframe filter
     let timeframeFilter;
@@ -965,7 +966,7 @@ router.get("/stats/summary", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET ENTRIES BY CATEGORY WITH TIMEFRAME ---------- */
-router.get("/category/:category", authMiddleware, async (req, res) => {
+router.get("/category/:category", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const { category } = req.params;
     
@@ -1009,7 +1010,7 @@ router.get("/category/:category", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET ENTRIES BY SOURCE WITH TIMEFRAME ---------- */
-router.get("/source/:source", authMiddleware, async (req, res) => {
+router.get("/source/:source", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const { source } = req.params;
     
@@ -1053,7 +1054,7 @@ router.get("/source/:source", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET ENTRIES BY PAYMENT METHOD WITH TIMEFRAME ---------- */
-router.get("/payment/:method", authMiddleware, async (req, res) => {
+router.get("/payment/:method", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const { method } = req.params;
     
@@ -1097,7 +1098,7 @@ router.get("/payment/:method", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET USER'S ENTRIES WITH TIMEFRAME ---------- */
-router.get("/user/me", authMiddleware, async (req, res) => {
+router.get("/user/me", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     // Build timeframe filter
     let timeframeFilter;
@@ -1139,7 +1140,7 @@ router.get("/user/me", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET USER PERMISSIONS ---------- */
-router.get("/permissions/me", authMiddleware, async (req, res) => {
+router.get("/permissions/me", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const permissions = {
       canCreate: true, // Everyone can create entries
@@ -1159,7 +1160,7 @@ router.get("/permissions/me", authMiddleware, async (req, res) => {
 });
 
 /** ---------- GET ENTRIES HISTORY/AUDIT LOG ---------- */
-router.get("/:id/history", authMiddleware, async (req, res) => {
+router.get("/:id/history", authMiddleware, requirePageAccess("/entry", "/entryhistory"), async (req, res) => {
   try {
     const entry = await Entry.findById(req.params.id)
       .populate("editHistory.editedBy", "username email");

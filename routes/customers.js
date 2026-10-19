@@ -5,7 +5,14 @@ const Sale = require("../models/Sale"); // Make sure to import Sale model
 const authMiddleware = require("../middleware/auth");
 const { validateObjectIdParam } = require("../middleware/security");
 
+const { requirePageAccess } = require("../utils/accessPolicy");
+
 router.use(authMiddleware);
+// The sale screen may look a customer up by phone; everything else is the
+// administrator-only Customers page.
+const salesLookup = requirePageAccess("/", "/sales", "/customers");
+const customersPage = requirePageAccess("/customers");
+router.use((req, res, next) => (req.method === "GET" && req.path.startsWith("/phone/") ? salesLookup : customersPage)(req, res, next));
 router.param("id", validateObjectIdParam("customer ID"));
 
 // GET /api/customers - Get all customers with optional filtering

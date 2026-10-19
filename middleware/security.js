@@ -10,6 +10,7 @@ function hasMongoOperator(value) {
 
 function preventNoSqlInjection(req, res, next) {
   if (hasMongoOperator(req.body) || hasMongoOperator(req.query)) {
+    if (res.locals) res.locals.audit = { ...(res.locals.audit || {}), injectionBlocked: true };
     return res.status(400).json({ message: "Invalid request" });
   }
   next();
@@ -27,6 +28,7 @@ function validateObjectIdParam(name = "id") {
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user || !roles.includes(req.user.role)) {
+      if (res.locals) res.locals.accessDenied = { reason: "role", roles };
       return res.status(403).json({ message: "Forbidden" });
     }
     next();

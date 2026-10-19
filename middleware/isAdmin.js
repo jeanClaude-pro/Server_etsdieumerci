@@ -9,6 +9,7 @@ async function isAdmin(req, res, next) {
     }
 
     if (user.role !== "admin") {
+      res.locals.accessDenied = { reason: "admin_required" };
       return res.status(403).json({ message: "Access denied: Admins only" });
     }
 

@@ -7,7 +7,9 @@ const crypto = require('crypto');
 const Sale = require('../models/Sale');
 const { decryptReceiptToken, normalizeReceiptToken } = require('../utils/receiptTokenCrypto');
 
-router.use(authMiddleware);
+const { requirePageAccess } = require('../utils/accessPolicy');
+
+router.use(authMiddleware, requirePageAccess('/', '/sales'));
 
 function fcUnitPrice(item, saleRate) {
   if (item.enteredCurrency === 'FC' && Number.isFinite(Number(item.enteredPrice))) return Number(item.enteredPrice);

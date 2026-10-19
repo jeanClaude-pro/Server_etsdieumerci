@@ -7,6 +7,8 @@ const Entry = require("../models/Entry");
 const User = require("../models/User");
 const Sale = require("../models/Sale");
 const Expense = require("../models/Expense");
+const Loan = require("../models/Loan");
+const Creditor = require("../models/Creditor");
 
 // Real HTTP routes, authentication and Mongoose validation; persistence is
 // replaced with an in-memory collection so no production database is touched.
@@ -15,7 +17,10 @@ test("authenticated entry is saved, searchable, and included in analytics", asyn
   process.env.JWT_SECRET = "entry-flow-test-only";
   t.after(() => { if (previousSecret === undefined) delete process.env.JWT_SECRET; else process.env.JWT_SECRET = previousSecret; });
   const userId = "507f1f77bcf86cd799439011";
-  t.mock.method(User, "findById", async () => ({ _id: userId, username: "Cashier", role: "manager", isActive: true }));
+  const adminId = "507f1f77bcf86cd799439012";
+  t.mock.method(User, "findById", async (id) => (String(id) === adminId
+    ? { _id: adminId, username: "Owner", role: "admin", isActive: true }
+    : { _id: userId, username: "Cashier", role: "manager", isActive: true }));
   t.mock.method(User, "find", () => ({ select: () => ({ lean: async () => [] }) }));
   const rows = [];
   t.mock.method(Entry.prototype, "save", async function () {
@@ -46,6 +51,8 @@ test("authenticated entry is saved, searchable, and included in analytics", asyn
   });
   t.mock.method(Sale, "aggregate", () => ({ allowDiskUse: async () => [] }));
   t.mock.method(Expense, "aggregate", async () => []);
+  t.mock.method(Loan, "aggregate", async () => []);
+  t.mock.method(Creditor, "aggregate", async () => []);
   const app = express();
   app.use(express.json());
   app.use("/api/entries", require("../routes/entries"));
@@ -73,13 +80,17 @@ test("authenticated entry is saved, searchable, and included in analytics", asyn
     assert.equal(history.data[0].entryId, saved.entryId);
     assert.equal(history.summary.totalAmount, saved.amount);
   }
-  const analytics = await (await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers })).json();
+  // Revenue figures are administrator-only on the server, not just hidden.
+  const managerAnalytics = await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers });
+  assert.equal(managerAnalytics.status, 403);
+  const adminHeaders = { ...headers, Authorization: `Bearer ${jwt.sign({ id: adminId }, process.env.JWT_SECRET, { expiresIn: "1h" })}` };
+  const analytics = await (await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers: adminHeaders })).json();
   assert.equal(analytics.data.totalEntries, saved.amount);
   assert.equal(analytics.data.entryCount, 1);
   assert.equal(analytics.data.netCash, saved.amount);
   assert.equal(analytics.data.totalRevenue, 0);
   rows[0].status = "deleted";
-  const afterDeletion = await (await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers })).json();
+  const afterDeletion = await (await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers: adminHeaders })).json();
   assert.equal(afterDeletion.data.totalEntries, 0);
   assert.equal(afterDeletion.data.entryCount, 0);
   for (const invalid of [{ source: {} }, { category: " " }, { enteredAmount: -1 }, { exchangeRate: 0 }, { receivedFrom: { name: " ", phone: "+243123" } }, { receivedFrom: undefined }]) {

@@ -7,10 +7,16 @@ const Expense = require("../models/Expense");
 const { normalizeAmountSnapshot } = require("../utils/salePricing");
 
 const router = express.Router();
-const adminOnly = (req, res, next) => req.user?.role === "admin" ? next() : res.status(403).json({ error: "Administrator access required" });
+const adminOnly = (req, res, next) => {
+  if (req.user?.role === "admin") return next();
+  res.locals.accessDenied = { reason: "admin_required" };
+  return res.status(403).json({ error: "Administrator access required" });
+};
 const clean = (value) => String(value || "").trim();
 
-router.get("/selector", auth, async (_req, res) => {
+const { requirePageAccess } = require("../utils/accessPolicy");
+
+router.get("/selector", auth, requirePageAccess("/sortie", "/sortiehistory", "/remboursements"), async (_req, res) => {
   const rows = await Creditor.find({ isActive: true }).select("name type phone").sort({ name: 1 }).lean();
   res.json(rows);
 });

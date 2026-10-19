@@ -4,6 +4,7 @@ const router = express.Router();
 const Product = require("../models/Product");
 const StockMovement = require("../models/StockMovement");
 const authMiddleware = require("../middleware/auth");
+const { requirePageAccess } = require("../utils/accessPolicy");
 const isAdmin = require("../middleware/isAdmin");
 const { SELLABLE_PRODUCT_FILTER } = require("../utils/productAvailability");
 const {
@@ -22,6 +23,15 @@ const {
   seriesGranularity,
 } = require("../utils/stockLedger");
 const { isTransactionUnsupported, runTransaction } = require("../utils/transaction");
+
+function parseMoney(value, fieldName) {
+  if (value === undefined || value === null || value === "") return 0;
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new HttpError(400, `${fieldName} must be a number greater than or equal to 0`);
+  }
+  return amount;
+}
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -68,7 +78,7 @@ function parseStockQuantity(value, fieldName = "stock") {
 }
 
 // GET /api/products - Get all products with optional filtering
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", authMiddleware, requirePageAccess("/", "/sales", "/products", "/dashboard"), async (req, res) => {
   console.log("Fetching products with filters:", req.query);
   try {
     const { search, category, status, availability, includeInactive } = req.query;
@@ -226,7 +236,7 @@ router.get("/:id/stock-card", authMiddleware, isAdmin, async (req, res) => {
 });
 
 // GET /api/products/:id - Get a single product by ID
-router.get("/:id", authMiddleware, async (req, res) => {
+router.get("/:id", authMiddleware, requirePageAccess("/", "/sales", "/products", "/dashboard"), async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
 
@@ -276,7 +286,7 @@ router.post("/", authMiddleware, isAdmin, async (req, res) => {
         description: description || "",
         category,
         brand: brand || "",
-        price: Number(price) || 0,
+        price: parseMoney(price, "price"),
         stock: parseStockQuantity(stock ?? 0),
         minStock: Number(minStock) || 0,
         unit: unit || "pcs",
@@ -289,6 +299,10 @@ router.post("/", authMiddleware, isAdmin, async (req, res) => {
       await recordInitialStock(saved, { session, user: req.user, at });
       return saved;
     });
+    res.locals.audit = {
+      resourceId: String(savedProduct._id),
+      summary: { name: savedProduct.name, stock: savedProduct.stock },
+    };
     res.status(201).json(savedProduct);
   } catch (error) {
     console.error("Error creating product:", error);
@@ -317,8 +331,9 @@ router.post("/:id/stock-movements", authMiddleware, isAdmin, async (req, res) =>
       return res.status(400).json({ error: "La raison de la correction est obligatoire" });
     }
 
+    let stockBefore = null;
     const product = await runTransaction(async (session) => {
-      await applyStockChange({
+      const changed = await applyStockChange({
         productId: req.params.id,
         quantity,
         type,
@@ -326,8 +341,14 @@ router.post("/:id/stock-movements", authMiddleware, isAdmin, async (req, res) =>
         user: req.user,
         reason: reason || (type === "restock" ? "Réapprovisionnement" : ""),
       });
+      stockBefore = changed.stock - quantity;
       return Product.findById(req.params.id).session(session);
     });
+    res.locals.audit = {
+      stockRemoved: quantity < 0 ? -quantity : 0,
+      stockBefore,
+      summary: { product: product?.name, type, quantity, stockBefore, stockAfter: product?.stock, reason },
+    };
     res.status(201).json(product);
   } catch (error) {
     console.error("Error recording stock movement:", error);
@@ -360,13 +381,14 @@ router.put("/:id", authMiddleware, isAdmin, async (req, res) => {
     if (description !== undefined) updateData.description = description;
     if (category !== undefined) updateData.category = category;
     if (brand !== undefined) updateData.brand = brand;
-    if (price !== undefined) updateData.price = Number(price);
+    if (price !== undefined) updateData.price = parseMoney(price, "price");
     if (minStock !== undefined) updateData.minStock = Number(minStock);
     if (unit !== undefined) updateData.unit = unit;
     if (weight !== undefined) updateData.weight = Number(weight);
     if (status !== undefined) updateData.status = status;
 
     const nextStock = stock === undefined ? undefined : parseStockQuantity(stock);
+    let auditBefore = null;
 
     const updatedProduct = await runTransaction(async (session) => {
       const current = await Product.findById(req.params.id).session(session).lean();
@@ -406,9 +428,21 @@ router.put("/:id", authMiddleware, isAdmin, async (req, res) => {
         });
       }
 
+      auditBefore = current;
       return Product.findById(current._id).session(session);
     });
 
+    const changes = {};
+    for (const field of ["name", "category", "minStock", "status", "stock"]) {
+      if (auditBefore && updatedProduct && String(auditBefore[field] ?? "") !== String(updatedProduct[field] ?? "")) {
+        changes[field] = { from: auditBefore[field] ?? null, to: updatedProduct[field] ?? null };
+      }
+    }
+    res.locals.audit = {
+      stockRemoved: changes.stock && changes.stock.to < changes.stock.from ? changes.stock.from - changes.stock.to : 0,
+      stockBefore: changes.stock?.from,
+      summary: { product: updatedProduct?.name, changes },
+    };
     res.json(updatedProduct);
   } catch (error) {
     console.error("Error updating product:", error);
