@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const express = require("express");
-const jwt = require("jsonwebtoken");
+const { tokenFor: sessionToken, mockSessionStore } = require("./helpers/auth");
 const { once } = require("node:events");
 const Entry = require("../models/Entry");
 const User = require("../models/User");
@@ -53,6 +53,7 @@ test("authenticated entry is saved, searchable, and included in analytics", asyn
   t.mock.method(Expense, "aggregate", async () => []);
   t.mock.method(Loan, "aggregate", async () => []);
   t.mock.method(Creditor, "aggregate", async () => []);
+  mockSessionStore(t);
   const app = express();
   app.use(express.json());
   app.use("/api/entries", require("../routes/entries"));
@@ -61,7 +62,7 @@ test("authenticated entry is saved, searchable, and included in analytics", asyn
   await once(server, "listening");
   t.after(() => new Promise(resolve => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}/api`;
-  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "1h" })}` };
+  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken(userId)}` };
   const body = { amount: 4.21, enteredAmount: 12000, enteredCurrency: "FC", exchangeRate: 2850, source: "Transfert Mobile", category: "Investissement", paymentMethod: "transfer", receivedFrom: { name: "Alice (shop)", phone: "+243123" } };
   const denied = await fetch(`${base}/entries`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   assert.equal(denied.status, 401);
@@ -83,7 +84,7 @@ test("authenticated entry is saved, searchable, and included in analytics", asyn
   // Revenue figures are administrator-only on the server, not just hidden.
   const managerAnalytics = await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers });
   assert.equal(managerAnalytics.status, 403);
-  const adminHeaders = { ...headers, Authorization: `Bearer ${jwt.sign({ id: adminId }, process.env.JWT_SECRET, { expiresIn: "1h" })}` };
+  const adminHeaders = { ...headers, Authorization: `Bearer ${sessionToken(adminId)}` };
   const analytics = await (await fetch(`${base}/analytics/summary?date=2026-09-28`, { headers: adminHeaders })).json();
   assert.equal(analytics.data.totalEntries, saved.amount);
   assert.equal(analytics.data.entryCount, 1);

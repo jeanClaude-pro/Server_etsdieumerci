@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
+    "lint": "eslint .",
     "test": "node --test test/*.test.js",
     "test:integration": "node --test test/integration/*.test.js"
   },
@@ -26,7 +27,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
     "morgan": "^1.10.1",
-    "nodemailer": "^9.0.6",
+    "nodemailer": "^10.4.0",
     "nodemon": "^3.1.10"
   },
   "overrides": {
@@ -38,6 +39,9 @@
     }
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
     "mingo": "^7.2.4",
     "mongodb-memory-server-core": "^11.3.0"
   }

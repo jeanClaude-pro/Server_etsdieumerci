@@ -8,6 +8,7 @@ const Sale = require('../models/Sale');
 const { decryptReceiptToken, normalizeReceiptToken } = require('../utils/receiptTokenCrypto');
 
 const { requirePageAccess } = require('../utils/accessPolicy');
+const { printFestiveGreeting } = require('../utils/festiveGreeting');
 
 router.use(authMiddleware, requirePageAccess('/', '/sales'));
 
@@ -192,6 +193,9 @@ router.post('/receipt', async (req, res) => {
             .style('normal')
             .align('lt');
         }
+
+        // Seasonal greeting (presentation only, festive season only)
+        printFestiveGreeting(printer);
 
         // Footer
         printer

@@ -79,7 +79,6 @@ function parseStockQuantity(value, fieldName = "stock") {
 
 // GET /api/products - Get all products with optional filtering
 router.get("/", authMiddleware, requirePageAccess("/", "/sales", "/products", "/dashboard"), async (req, res) => {
-  console.log("Fetching products with filters:", req.query);
   try {
     const { search, category, status, availability, includeInactive } = req.query;
 

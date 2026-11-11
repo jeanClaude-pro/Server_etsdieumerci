@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const express = require("express");
-const jwt = require("jsonwebtoken");
+const { tokenFor: sessionToken, mockSessionStore } = require("./helpers/auth");
 const { once } = require("node:events");
 const { Aggregator } = require("mingo");
 const User = require("../models/User");
@@ -111,6 +111,7 @@ async function startApp(t, data) {
   }
   t.mock.method(Product.prototype, "save", () => { writes.push("Product.save"); throw new Error("write attempted"); });
 
+  mockSessionStore(t);
   const app = express();
   app.use(express.json());
   app.use("/api/dashboard", require("../routes/dashboard"));
@@ -120,7 +121,7 @@ async function startApp(t, data) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
 
   const base = `http://127.0.0.1:${server.address().port}/api`;
-  const tokenFor = (role) => jwt.sign({ id: role }, process.env.JWT_SECRET, { expiresIn: "1h" });
+  const tokenFor = (role) => sessionToken(role);
   const get = async (path, role = "admin") => {
     const response = await fetch(`${base}${path}`, role ? { headers: { Authorization: `Bearer ${tokenFor(role)}` } } : {});
     return { status: response.status, body: await response.json() };

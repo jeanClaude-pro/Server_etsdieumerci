@@ -1,9 +1,18 @@
 require("dotenv").config();
+
+// Production keeps errors and warnings in the server logs but drops debug
+// chatter (console.log / console.debug), so no internal detail is printed by
+// accident. Set DEBUG_LOGS=true temporarily to see it again.
+if (process.env.NODE_ENV === "production" && process.env.DEBUG_LOGS !== "true") {
+  console.log = () => {};
+  console.debug = () => {};
+}
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const morgan = require("morgan");
 const helmet = require("helmet");
+const { rateLimit } = require("express-rate-limit");
 const { preventNoSqlInjection } = require("./middleware/security");
 const auditTrail = require("./middleware/auditTrail");
 const { validateReceiptTokenConfiguration } = require("./utils/receiptTokenCrypto");
@@ -44,7 +53,24 @@ app.use((error, _req, res, next) => {
   }
   next(error);
 });
-app.use(morgan("combined"));
+// Production: one short line per request, without user agents or referrers.
+app.use(morgan(isProduction ? ":remote-addr :method :url :status :response-time ms" : "dev"));
+
+// Cap on API traffic per IP address so the server cannot be flooded or
+// scraped. Generous enough for a whole shop behind one internet connection.
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: Number(process.env.API_RATE_LIMIT_PER_MINUTE) || 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests. Please try again later." },
+});
+app.use("/api", apiLimiter);
+// API answers carry live business data: never let a browser or proxy cache them.
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 // Security journal: observes every API request once its response is sent.
 app.use("/api", auditTrail);
 app.use(preventNoSqlInjection);
@@ -111,7 +137,6 @@ app.use("/api/sales", require("./routes/sales"));
 app.use("/api/customers", require("./routes/customers"));
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/users", require("./routes/users"));
-app.use("/api/test", require("./routes/test"));
 app.use("/api/categories", require("./routes/categories"));
 app.use('/api/print', printRoutes);
 app.use("/api/expenses", require("./routes/expenses")); // ✅ Added expense routes
@@ -122,9 +147,14 @@ app.use("/api/analytics", require("./routes/analytics"));
 app.use("/api/creditors", require("./routes/creditors"));
 app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/audit", require("./routes/audit"));
-// Default route
-app.get("/", (req, res) => {
-  res.send("ERP/POS System Backend is running...");
+// Health check (says nothing about the software behind it).
+app.get("/", (_req, res) => {
+  res.type("text/plain").send("OK");
+});
+
+// Unknown API paths get a plain JSON 404 instead of Express's HTML page.
+app.use("/api", (_req, res) => {
+  res.status(404).json({ message: "Not found" });
 });
 
 app.use((error, _req, res, _next) => {
@@ -137,9 +167,9 @@ app.use((error, _req, res, _next) => {
 mongoose
   .connect(MONGO_URI)
   .then(() => {
-    console.log("✅ Connected to MongoDB Atlas");
+    console.info("Connected to MongoDB");
     app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
+      console.info(`Server listening on port ${PORT}`);
     });
     // Start the stock ledger for products it does not cover yet (first run
     // after deployment, or products inserted directly into the database).
@@ -153,6 +183,6 @@ mongoose
       .catch((error) => console.error("Stock ledger baseline error:", error.message));
   })
   .catch((err) => {
-    console.error("❌ MongoDB connection error:", err.message);
+    console.error("MongoDB connection error:", err.name || "Error");
     process.exit(1);
   });

@@ -827,7 +827,7 @@ router.patch("/:id/reject", authMiddleware, requirePageAccess("/sortie", "/sorti
 /** ---------- UPDATE EXPENSE (ENHANCED FOR ALL STATUSES WITH ADMIN CHECK) ---------- **/
 router.put("/:id", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"), async (req, res) => {
   try {
-    const { reason, recipientName, recipientPhone, amount, paymentMethod, notes, updateReason } = req.body;
+    const { reason, recipientName, recipientPhone, amount, paymentMethod, updateReason } = req.body;
 
     // Validation
     if (!reason || !recipientName || !recipientPhone || !amount) {
@@ -847,7 +847,6 @@ router.put("/:id", authMiddleware, requirePageAccess("/sortie", "/sortiehistory"
     const sanitizedReason = sanitizeInput(reason);
     const sanitizedRecipientName = sanitizeInput(recipientName);
     const sanitizedRecipientPhone = sanitizeInput(recipientPhone).replace(/\s+/g, "");
-    const sanitizedNotes = sanitizeInput(notes);
     const sanitizedUpdateReason = sanitizeInput(updateReason);
 
     const normalizedPM = normalizePaymentMethod(paymentMethod);
@@ -1332,7 +1331,7 @@ router.get("/test/email", authMiddleware, requireAdmin, async (req, res) => {
     console.error("Test email error:", error);
     res.status(500).json({ 
       success: false,
-      error: error.message 
+      error: process.env.NODE_ENV === "production" ? "Email test failed" : error.message 
     });
   }
 });
@@ -1365,7 +1364,7 @@ router.get("/test/email-update", authMiddleware, requireAdmin, async (req, res) 
     console.error("Test update email error:", error);
     res.status(500).json({ 
       success: false,
-      error: error.message 
+      error: process.env.NODE_ENV === "production" ? "Email test failed" : error.message 
     });
   }
 });
@@ -1392,7 +1391,7 @@ router.get("/test/email-delete", authMiddleware, requireAdmin, async (req, res) 
     console.error("Test delete email error:", error);
     res.status(500).json({ 
       success: false,
-      error: error.message 
+      error: process.env.NODE_ENV === "production" ? "Email test failed" : error.message 
     });
   }
 });

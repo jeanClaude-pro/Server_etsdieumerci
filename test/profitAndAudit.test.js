@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const express = require("express");
-const jwt = require("jsonwebtoken");
+const { tokenFor: sessionToken, mockSessionStore } = require("./helpers/auth");
 const { once } = require("node:events");
 const { Aggregator } = require("mingo");
 const User = require("../models/User");
@@ -149,6 +149,7 @@ async function startApp(t) {
     return query;
   });
 
+  mockSessionStore(t);
   const app = express();
   app.use(express.json());
   app.use("/api/analytics", require("../routes/analytics"));
@@ -159,7 +160,7 @@ async function startApp(t) {
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}/api`;
   return async (path, role = "admin") => {
-    const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${jwt.sign({ id: role }, process.env.JWT_SECRET, { expiresIn: "1h" })}` } });
+    const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${sessionToken(role)}` } });
     return { status: response.status, body: await response.json() };
   };
 }
@@ -213,6 +214,7 @@ test("audit middleware journals mutations and refusals after the response, witho
   t.mock.method(AuditLog, "create", async (entry) => { written.push(entry); return entry; });
   t.mock.method(AuditLog, "countDocuments", async () => 0);
   const auditTrail = require("../middleware/auditTrail");
+  mockSessionStore(t);
   const app = express();
   app.use(express.json());
   app.use("/api", auditTrail);

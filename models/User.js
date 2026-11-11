@@ -36,6 +36,13 @@ const userSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    // Raised to end every open session of this user at once (role change,
+    // deactivation, "log out everywhere"). Tokens carry the value they were
+    // issued with and are refused once it no longer matches.
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );

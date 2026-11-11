@@ -4,6 +4,23 @@ const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const authMiddleware = require("../middleware/auth");
 const { validateObjectIdParam } = require("../middleware/security");
+const { PAGE_ROLES } = require("../utils/accessPolicy");
+const { BCRYPT_ROUNDS } = require("./auth");
+
+const KNOWN_PAGES = new Set(Object.keys(PAGE_ROLES));
+const ACTION_KEY = /^[a-z][a-z0-9_]{1,48}$/;
+
+// Only known page paths / well-formed action keys are stored; anything else
+// in the request is refused instead of being saved as-is.
+function cleanPermissionList(value, isValid, max) {
+  if (!Array.isArray(value) || value.length > max) return null;
+  const out = [];
+  for (const item of value) {
+    if (typeof item !== "string" || !isValid(item)) return null;
+    if (!out.includes(item)) out.push(item);
+  }
+  return out;
+}
 
 // This account is always hidden from other admins and cannot be modified/deleted by them.
 const SUPER_ADMIN_EMAIL = String(process.env.SUPER_ADMIN_EMAIL || "").trim().toLowerCase();
@@ -24,7 +41,7 @@ router.get("/me", async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" });
     res.json(user);
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -47,7 +64,7 @@ router.get("/", async (req, res) => {
 
     res.json(users);
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -83,7 +100,7 @@ router.post("/", async (req, res) => {
         .json({ message: "Le mot de passe doit comporter entre 10 et 128 caractères" });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const newUser = new User({ username, email, password: hashedPassword, role });
     await newUser.save();
 
@@ -95,7 +112,7 @@ router.post("/", async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ message: "Cet email est déjà utilisé" });
     }
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -103,13 +120,13 @@ router.post("/", async (req, res) => {
 // Update username — admin can update any user, regular users update themselves only
 router.put("/:userId/username", async (req, res) => {
   try {
-    const { username } = req.body;
+    const username = typeof req.body?.username === "string" ? req.body.username : "";
     const targetId = req.params.userId;
 
     if (req.user.role !== "admin" && targetId !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
-    if (!username || !username.trim() || username.trim().length > 80) {
+    if (!username.trim() || username.trim().length > 80) {
       return res.status(400).json({ message: "Le nom d'utilisateur ne peut pas être vide" });
     }
 
@@ -131,7 +148,7 @@ router.put("/:userId/username", async (req, res) => {
       role: target.role,
     });
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -149,6 +166,10 @@ router.put("/:userId/role", async (req, res) => {
       return res.status(403).json({ message: "Action non autorisée sur ce compte" });
     }
 
+    if (target._id.toString() === req.user._id.toString()) {
+      return res.status(400).json({ message: "Vous ne pouvez pas modifier votre propre rôle" });
+    }
+
     const { role } = req.body;
     const validRoles = [
       "admin",
@@ -161,15 +182,17 @@ router.put("/:userId/role", async (req, res) => {
       return res.status(400).json({ message: "Invalid role" });
     }
 
+    // A new role ends the user's open sessions: they sign in again and the
+    // app is rebuilt from the new rights.
     const updated = await User.findByIdAndUpdate(
       req.params.userId,
-      { role },
+      { $set: { role }, ...(role !== target.role ? { $inc: { tokenVersion: 1 } } : {}) },
       { new: true }
     ).select("_id username email role isActive");
 
     res.json(updated);
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -187,7 +210,13 @@ router.put("/:userId/status", async (req, res) => {
       return res.status(403).json({ message: "Action non autorisée sur ce compte" });
     }
 
+    if (user._id.toString() === req.user._id.toString()) {
+      return res.status(400).json({ message: "Vous ne pouvez pas désactiver votre propre compte" });
+    }
+
     user.isActive = !user.isActive;
+    // Deactivation (and reactivation) ends every open session at once.
+    user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
     await user.save();
 
     res.json({
@@ -201,7 +230,7 @@ router.put("/:userId/status", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -225,7 +254,7 @@ router.delete("/:userId", async (req, res) => {
     await User.findByIdAndDelete(req.params.userId);
     res.json({ message: "User deleted successfully" });
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -237,8 +266,8 @@ router.put("/:userId/permissions", async (req, res) => {
       return res.status(403).json({ message: "Access denied. Admin role required." });
     }
 
-    const { permissions } = req.body;
-    if (!Array.isArray(permissions)) {
+    const permissions = cleanPermissionList(req.body?.permissions, (path) => KNOWN_PAGES.has(path), 50);
+    if (!permissions) {
       return res.status(400).json({ message: "Permissions must be an array" });
     }
 
@@ -256,7 +285,7 @@ router.put("/:userId/permissions", async (req, res) => {
 
     res.json(updated);
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -268,8 +297,8 @@ router.put("/:userId/actions", async (req, res) => {
       return res.status(403).json({ message: "Access denied. Admin role required." });
     }
 
-    const { actionPermissions } = req.body;
-    if (!Array.isArray(actionPermissions)) {
+    const actionPermissions = cleanPermissionList(req.body?.actionPermissions, (key) => ACTION_KEY.test(key), 50);
+    if (!actionPermissions) {
       return res.status(400).json({ message: "actionPermissions must be an array" });
     }
 
@@ -287,7 +316,7 @@ router.put("/:userId/actions", async (req, res) => {
 
     res.json(updated);
   } catch (error) {
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
   }
 });
@@ -295,7 +324,8 @@ router.put("/:userId/actions", async (req, res) => {
 // Update profile (username/email) — own account or admin
 router.put("/:userId/profile", async (req, res) => {
   try {
-    const { username, email } = req.body;
+    const username = typeof req.body?.username === "string" ? req.body.username : "";
+    const email = typeof req.body?.email === "string" ? req.body.email : "";
     const targetId = req.params.userId;
 
     if (req.user.role !== "admin" && targetId !== req.user._id.toString()) {
@@ -309,7 +339,10 @@ router.put("/:userId/profile", async (req, res) => {
     }
 
     const updateData = {};
-    if (username) updateData.username = username.trim();
+    if (username.trim()) {
+      if (username.trim().length > 80) return res.status(400).json({ message: "Invalid username" });
+      updateData.username = username.trim();
+    }
     if (email) {
       const cleanEmail = String(email).trim().toLowerCase();
       if (cleanEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
@@ -327,8 +360,29 @@ router.put("/:userId/profile", async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ message: "Email already exists" });
     }
-    console.error(error);
+    console.error("Users route error:", error?.name || "Error");
     res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// End every open session of a user (lost phone, shared computer, suspected
+// misuse) — admin only. The user must sign in again on every device.
+router.post("/:userId/revoke-sessions", async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Access denied. Admin role required." });
+    }
+    const target = await User.findById(req.params.userId);
+    if (!target) return res.status(404).json({ message: "User not found" });
+    if (target.email === SUPER_ADMIN_EMAIL && !isSuperAdmin(req.user)) {
+      return res.status(403).json({ message: "Action non autorisée sur ce compte" });
+    }
+    await User.updateOne({ _id: target._id }, { $inc: { tokenVersion: 1 } });
+    res.locals.audit = { resourceId: target._id.toString(), summary: { target: target.email } };
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("Revoke sessions error:", error?.name || "Error");
+    return res.status(500).json({ message: "Internal server error" });
   }
 });
 

@@ -8,6 +8,8 @@ const CATALOGUE = [
   ["POST", "/api/auth/login", "auth.login", "auth"],
   ["POST", "/api/auth/register", "auth.register", "auth"],
   ["POST", "/api/auth/verify-password", "auth.verify_password", "auth"],
+  ["POST", "/api/auth/logout", "auth.logout", "auth"],
+  ["POST", "/api/auth/logout-all", "auth.logout_all", "auth"],
 
   ["POST", "/api/sales", "sale.create", "sales"],
   ["PUT", "/api/sales/:id", "sale.update", "sales"],
@@ -54,6 +56,7 @@ const CATALOGUE = [
   ["POST", "/api/customers/:id/recalculate", "customer.recalculate", "customers"],
 
   ["POST", "/api/users", "user.create", "users"],
+  ["POST", "/api/users/:id/revoke-sessions", "user.revoke_sessions", "users"],
   ["PUT", "/api/users/:id/username", "user.rename", "users"],
   ["PUT", "/api/users/:id/role", "user.role_change", "users"],
   ["PUT", "/api/users/:id/status", "user.status_change", "users"],
