@@ -37,19 +37,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: jeanClaude-pro/react_dieumerci
-          # GITHUB_TOKEN is scoped to this backend repository and cannot read
-          # the private frontend repository. Configure FRONTEND_REPO_TOKEN as
-          # a fine-grained token with read-only Contents access to that repo.
-          token: ${{ secrets.FRONTEND_REPO_TOKEN }}
           ref: main
           path: jean-client
           persist-credentials: false
           sparse-checkout: |
-            src/components/ReceiptScannerPage.tsx
-            src/pages/NewSale.tsx
-            src/pages/admin/AdminPanel.tsx
-            src/pages/analytics/Analytics.tsx
-            src/pages/history/SalesHistory.tsx
+            /src/components/ReceiptScannerPage.tsx
+            /src/pages/NewSale.tsx
+            /src/pages/admin/AdminPanel.tsx
+            /src/pages/analytics/Analytics.tsx
+            /src/pages/history/SalesHistory.tsx
           sparse-checkout-cone-mode: false
 
       - name: Configure MongoDB binary directory
