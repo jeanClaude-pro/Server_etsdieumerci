@@ -2,7 +2,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const express = require("express");
-const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const { once } = require("node:events");
 const { MongoMemoryReplSet } = require("mongodb-memory-server-core");
@@ -15,6 +14,7 @@ const Customer = require("../../models/Customer");
 const { applyStockChange, ensureStockBaselines } = require("../../utils/stockLedger");
 const { runTransaction } = require("../../utils/transaction");
 const { currentBusinessDate } = require("../../utils/queryHelpers");
+const generateToken = require("../../utils/generateToken");
 
 // End-to-end on a real single-node MongoDB replica set (transactions, real
 // aggregation engine, real indexes) through the real Express routes.
@@ -34,7 +34,7 @@ test.before(async () => {
 
   for (const role of ["admin", "manager"]) {
     const user = await User.create({ username: `${role}-it`, email: `${role}@it.test`, password: "x", role });
-    tokens[role] = jwt.sign({ id: user._id.toString() }, process.env.JWT_SECRET, { expiresIn: "1h" });
+    tokens[role] = generateToken(user);
   }
 
   const app = express();

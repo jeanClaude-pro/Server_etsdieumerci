@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: backend-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -21,10 +21,10 @@ jobs:
     env:
       CI: true
       NODE_ENV: test
-      # Architecture tests inspect the frontend checkout without merging the repos.
+      # Architecture tests inspect the frontend without merging the repos.
       JEAN_CLIENT_DIR: jean-client
-      # mongodb-memory-server downloads and starts this pinned local binary.
-      # No Atlas URI or repository secret is used by the test suite.
+      # The integration suite downloads this local mongod and starts a
+      # single-node replica set. No Atlas URI or repository secret is used.
       MONGOMS_VERSION: 8.2.6
 
     steps:
@@ -40,7 +40,7 @@ jobs:
           path: jean-client
           persist-credentials: false
 
-      - name: Configure MongoDB binary cache
+      - name: Configure MongoDB binary directory
         run: echo "MONGOMS_DOWNLOAD_DIR=${{ runner.temp }}/mongodb-binaries" >> "$GITHUB_ENV"
 
       - name: Set up Node.js
