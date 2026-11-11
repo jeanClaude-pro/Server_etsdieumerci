@@ -4,15 +4,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 const Sale = require("../models/Sale");
 const receiptCrypto = require("../utils/receiptTokenCrypto");
+const clientSourcePath = require("./clientSourcePath");
 
 const salesRoutes = fs.readFileSync(path.join(__dirname, "../routes/sales.js"), "utf8");
 const printRoutes = fs.readFileSync(path.join(__dirname, "../routes/print.js"), "utf8");
 const newSalePage = fs.readFileSync(
-  path.join(__dirname, "../../jean-client/src/pages/NewSale.tsx"),
+  clientSourcePath("src/pages/NewSale.tsx"),
   "utf8"
 );
 const scannerPage = fs.readFileSync(
-  path.join(__dirname, "../../jean-client/src/components/ReceiptScannerPage.tsx"),
+  clientSourcePath("src/components/ReceiptScannerPage.tsx"),
   "utf8"
 );
 

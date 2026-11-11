@@ -2,9 +2,10 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const clientSourcePath = require("./clientSourcePath");
 
 const clientAnalytics = fs.readFileSync(
-  path.join(__dirname, "../../jean-client/src/pages/analytics/Analytics.tsx"),
+  clientSourcePath("src/pages/analytics/Analytics.tsx"),
   "utf8"
 );
 const serverAnalytics = fs.readFileSync(

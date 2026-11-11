@@ -21,6 +21,8 @@ jobs:
     env:
       CI: true
       NODE_ENV: test
+      # Architecture tests inspect the frontend checkout without merging the repos.
+      JEAN_CLIENT_DIR: jean-client
       # mongodb-memory-server downloads and starts this pinned local binary.
       # No Atlas URI or repository secret is used by the test suite.
       MONGOMS_VERSION: 8.2.6
@@ -29,6 +31,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Check out frontend architecture fixtures
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jeanClaude-pro/react_dieumerci
+          path: jean-client
           persist-credentials: false
 
       - name: Configure MongoDB binary cache

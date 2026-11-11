@@ -2,11 +2,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const clientSourcePath = require("./clientSourcePath");
 
 const salesRoutes = fs.readFileSync(path.join(__dirname, "../routes/sales.js"), "utf8");
 const saleModel = fs.readFileSync(path.join(__dirname, "../models/Sale.js"), "utf8");
 const salesHistoryPage = fs.readFileSync(
-  path.join(__dirname, "../../jean-client/src/pages/history/SalesHistory.tsx"),
+  clientSourcePath("src/pages/history/SalesHistory.tsx"),
   "utf8"
 );
 

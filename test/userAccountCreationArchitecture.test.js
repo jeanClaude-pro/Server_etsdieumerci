@@ -2,10 +2,11 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const clientSourcePath = require("./clientSourcePath");
 
 const usersRoute = fs.readFileSync(path.join(__dirname, "../routes/users.js"), "utf8");
 const adminPanel = fs.readFileSync(
-  path.join(__dirname, "../../jean-client/src/pages/admin/AdminPanel.tsx"),
+  clientSourcePath("src/pages/admin/AdminPanel.tsx"),
   "utf8"
 );
 
